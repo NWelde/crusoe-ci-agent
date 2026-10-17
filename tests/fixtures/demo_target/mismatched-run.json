@@ -1,0 +1,27 @@
+{
+  "fixture_label": "SUPPLIED EXAMPLE DATA; NOT A REAL GITHUB RUN",
+  "comparison_id": "fixture-mismatched-revision-001",
+  "required_check": "tests",
+  "baseline": {
+    "run_id": "fixture-baseline-001",
+    "source_revision": "baseline-v1",
+    "workflow_fingerprint": "sha256:example-baseline-workflow",
+    "conclusion": "success",
+    "runner": "ubuntu-latest",
+    "required_runner_seconds": 120,
+    "required_checks": {"tests": "success"}
+  },
+  "candidate": {
+    "run_id": "fixture-candidate-001",
+    "source_revision": "different-revision-v2",
+    "workflow_fingerprint": "sha256:example-candidate-workflow",
+    "conclusion": "success",
+    "runner": "ubuntu-latest",
+    "required_runner_seconds": 100,
+    "required_checks": {"tests": "success"}
+  },
+  "expected_evaluation": {
+    "outcome": "void",
+    "reason": "baseline and candidate source revisions do not match"
+  }
+}

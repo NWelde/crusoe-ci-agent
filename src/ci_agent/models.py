@@ -133,14 +133,41 @@ class SuccessContract(ContractModel):
     id: str = Field(default_factory=new_id)
     goal_id: str
     version: int = Field(ge=1)
-    objective: str = "Reduce CI workflow completion time while preserving required checks."
-    allowed_optimizations: tuple[str, ...] = ("caching", "parallelism")
+    objective: str = "Reduce CI runner minutes while keeping required checks enabled and passing."
+    allowed_optimizations: tuple[str, ...] = ("caching", "parallelism", "runner_sizing")
     required_checks: tuple[RequiredCheck, ...]
     # User wait time from first required job start through last required job completion.
-    metric: str = "required_jobs_wall_clock_seconds"
+    metric: str = "required_runner_minutes"
     minimum_samples: int = Field(default=3, ge=2)
+    is_first_improvement: bool = True
     minimum_gain_percent: float = Field(default=5.0, ge=0)
+    practical_win_rule: str = (
+        "A practical win requires all three matched pairs to reduce required runner minutes and "
+        "the mean reduction to be at least 5%. This is a project decision rule, not proof of statistical certainty."
+    )
+    highlight_below_percent: float = Field(default=1.0, ge=0)
     max_run_pairs: int = Field(default=3, ge=1)
+    max_attempts: int = Field(default=3, ge=1)
+    max_experiment_minutes: int = Field(default=1440, ge=1)
+    comparison_conditions: tuple[str, ...] = (
+        "Run baseline and candidate on the same workflow revision.",
+        "Use the same runner type and dependency/cache conditions for each pair.",
+        "Run the full required workflow matrix; do not omit required matrix cells.",
+        "Aggregate required_runner_minutes by summing runner minutes across all required jobs and matrix cells.",
+        "The experiment time cap measures elapsed wall-clock time, not summed runner minutes.",
+        "Keep queue delay separate from runner time.",
+    )
+    stop_conditions: tuple[str, ...] = (
+        "Stop if any required check is disabled, removed, or fails.",
+        "Stop when the configured attempt, run-pair, or time budget is exhausted.",
+        "Stop and request human input when required context or access is missing.",
+    )
+    uncertainty_method: str | None = None
+    confidence_interval_method: str = (
+        "Report a paired 95% confidence interval for the mean runner-minute reduction alongside all three "
+        "pair results. Treat it as exploratory with only three pairs; it does not determine the practical "
+        "win verdict and must not be described as proof of statistical certainty."
+    )
     report_all_measured_effects: bool = True
     reviewed: bool = False
     created_at: datetime = Field(default_factory=utc_now)
@@ -149,8 +176,20 @@ class SuccessContract(ContractModel):
     def require_checks_and_samples(self) -> SuccessContract:
         if not self.required_checks:
             raise ValueError("at least one required check must be specified")
+        names = [check.name for check in self.required_checks]
+        if len(names) != len(set(names)):
+            raise ValueError("required check names must be unique")
+        if any(not check.required for check in self.required_checks):
+            raise ValueError("all contract checks must be required")
+        if not self.comparison_conditions:
+            raise ValueError("comparison conditions must be specified")
         if self.minimum_samples != self.max_run_pairs:
             raise ValueError("first-version policy requires exactly minimum_samples run pairs")
+        expected_minimum = 5.0 if self.is_first_improvement else 0.0
+        if self.minimum_gain_percent != expected_minimum:
+            raise ValueError(
+                "first improvement requires 5%; later improvements require evidence-backed positive gain"
+            )
         return self
 
 
@@ -159,7 +198,7 @@ class SharedGoal(ContractModel):
 
     id: str = Field(default_factory=new_id)
     workflow_id: str
-    objective: str = "Make CI faster while preserving all required checks."
+    objective: str = "Reduce CI runner minutes while keeping required checks enabled and passing."
     constraints: tuple[str, ...] = ()
     active_contract_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -192,9 +231,9 @@ class RunMeasurement(ContractModel):
     variant: RunVariant
     pair_index: int = Field(ge=1)
     run: RunSnapshot
-    # Main metric: first required-job start to last required-job completion.
+    # Secondary context: first required-job start to last required-job completion.
     wall_clock_seconds: float = Field(ge=0)
-    # Secondary diagnostic: sum of required-job durations, not the main verdict metric.
+    # Primary metric: sum of billable time across required jobs.
     runner_seconds: float = Field(ge=0)
     queue_seconds: float = Field(default=0, ge=0)
     runner: str
@@ -274,7 +313,13 @@ class VerdictRecord(ContractModel):
     evidence_fingerprint: str
     method_version: str
     sample_count: int = Field(ge=0)
-    metric: str = "required_jobs_wall_clock_seconds"
+    metric: str = "required_runner_minutes"
+    baseline_mean_runner_minutes: float | None = Field(default=None, ge=0)
+    candidate_mean_runner_minutes: float | None = Field(default=None, ge=0)
+    runner_minutes_saved: float | None = None
+    runner_minutes_reduction_percent: float | None = None
+    uncertainty_low_runner_minutes_saved: float | None = None
+    uncertainty_high_runner_minutes_saved: float | None = None
     baseline_mean_wall_clock_seconds: float | None = Field(default=None, ge=0)
     candidate_mean_wall_clock_seconds: float | None = Field(default=None, ge=0)
     wall_clock_saved_seconds: float | None = None
@@ -295,6 +340,11 @@ class ExperimentEvent(ContractModel):
     event_key: str
     state: ExperimentStatus
     reason: str
+    actor_role: str = "system"
+    rationale: str | None = None
+    evidence_refs: tuple[str, ...] = ()
+    prompt_version: str | None = None
+    model: str | None = None
     occurred_at: datetime = Field(default_factory=utc_now)
     details: dict[str, Any] = Field(default_factory=dict)
 

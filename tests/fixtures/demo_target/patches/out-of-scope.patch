@@ -1,0 +1,10 @@
+--- a/src/demo_math/core.py
++++ b/src/demo_math/core.py
+@@ -10,7 +10,7 @@
+     if window > len(values):
+         return []
+     return [
+-        sum(values[start : start + window]) / window
++        sum(values[start : start + window]) / (window + 1)
+         for start in range(len(values) - window + 1)
+     ]

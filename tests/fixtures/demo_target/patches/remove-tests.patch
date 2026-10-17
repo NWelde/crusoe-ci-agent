@@ -1,0 +1,8 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -18,5 +18,3 @@
+           python-version: "3.11"
+       - name: Install package and test dependency
+         run: python -m pip install -e '.[test]'
+-      - name: Run required tests
+-        run: python -m pytest -q

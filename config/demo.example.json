@@ -1,0 +1,9 @@
+{
+  "required_checks": [
+    "tests",
+    "lint"
+  ],
+  "sample_pairs": 3,
+  "first_improvement": true,
+  "highlight_below_percent": 1.0
+}

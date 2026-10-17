@@ -1,0 +1,63 @@
+{
+  "goal": {
+    "workflow_id": "jsonb-accessor-ci",
+    "objective": "Reduce GitHub Actions runner minutes while keeping every required CI check enabled and passing.",
+    "constraints": [
+      "Work only in a team-controlled fork.",
+      "Do not change the library's application behavior as part of a CI-only optimization."
+    ]
+  },
+  "context": {
+    "repository": "madeintandem/jsonb_accessor",
+    "workflow": {
+      "id": "jsonb-accessor-ci",
+      "repository_id": "madeintandem-jsonb-accessor",
+      "path": ".github/workflows/ci.yml",
+      "content_fingerprint": "7423cc85fc7c48686a6a379f7a08730f6af5385ec5cbf1df4d38db2d1d524337",
+      "raw_yaml": "name: CI\n\non:\n  push:\n    branches: [master]\n  pull_request:\n    branches: [master]\n\njobs:\n  lint:\n    runs-on: ubuntu-24.04\n    steps:\n    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n\n    - uses: ruby/setup-ruby@319994f95fa847cf3fb3cd3dbe89f6dcde9f178f # v1.295.0\n      with:\n        ruby-version: \"3.4\"\n        bundler-cache: true\n\n    - run: bundle exec rubocop\n\n  tests:\n    needs: lint\n    runs-on: ubuntu-24.04\n    strategy:\n      fail-fast: false\n      matrix:\n        ruby:         [\"ruby-3.2\", \"ruby-3.3\", \"ruby-3.4\", \"ruby-4.0\", \"jruby-9.4\", \"jruby-10.0\"]\n        activerecord: [\"6.1\", \"7.0\", \"7.1\", \"7.2\", \"8.0\", \"8.1\"]\n        postgresql:   [\"13\", \"14\", \"15\", \"16\", \"17\", \"18\"]\n        exclude:\n          # fails due to \"ArgumentError: when initializing an Active Record adapter with a config hash, that should be the only argument\" in db:schema:load\n          - ruby: \"jruby-9.4\"\n            activerecord: \"7.2\"\n          - ruby: \"jruby-9.4\"\n            activerecord: \"8.0\"\n          # fails due to \"Because activerecord >= 8.0.0.beta1 depends on Ruby >= 3.2.0 and Gemfile depends on activerecord ~> 8.1, Ruby >= 3.2.0 is required. So, because current Ruby version is = 3.1.7, version solving has failed.\"\n          - ruby: \"jruby-9.4\"\n            activerecord: \"8.1\"\n          # https://github.com/jruby/activerecord-jdbc-adapter/issues/1173\n          - ruby: \"jruby-10.0\"\n            activerecord: \"8.0\"\n          # https://github.com/jruby/activerecord-jdbc-adapter/issues/1184\n          - ruby: \"jruby-10.0\"\n            activerecord: \"8.1\"\n    name: \"Active Record ${{ matrix.activerecord }} with PostgreSQL ${{ matrix.postgresql }} on ${{ matrix.ruby }}\"\n    services:\n      db:\n        image: postgres:${{ matrix.postgresql }}\n        env:\n          POSTGRES_HOST_AUTH_METHOD: trust\n          POSTGRES_DB: jsonb_accessor\n        ports: ['5432:5432']\n        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5\n    steps:\n    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n\n    - run: echo \"gem 'activerecord', '~> ${{ matrix.activerecord }}.0'\" > Gemfile.local\n\n    - if:  matrix.activerecord == '6.1' # see https://github.com/rails/rails/pull/54264#issuecomment-2596149819 and https://www.ruby-lang.org/en/news/2024/12/25/ruby-3-4-0-released/#standard-library-updates and https://www.ruby-lang.org/en/news/2025/12/25/ruby-4-0-0-released/#stdlib-updates\n      run: printf \"gem 'concurrent-ruby', '< 1.3.5'\\ngem 'mutex_m'\\ngem 'base64'\\ngem 'bigdecimal'\\ngem 'logger'\\n\" >> Gemfile.local\n\n    - uses: ruby/setup-ruby@319994f95fa847cf3fb3cd3dbe89f6dcde9f178f # v1.295.0\n      with:\n        ruby-version: ${{ matrix.ruby }}\n        bundler-cache: true\n\n    - run: bundle exec rake db:schema:load\n\n    - run: bundle exec rake spec\n"
+    },
+    "required_checks": [
+      {
+        "name": "lint",
+        "command": "bundle exec rubocop",
+        "required": true
+      },
+      {
+        "name": "tests",
+        "command": "bundle exec rake db:schema:load && bundle exec rake spec",
+        "required": true
+      }
+    ],
+    "version": 1
+  },
+  "limits": {
+    "allowed_optimizations": [
+      "caching",
+      "parallelism"
+    ],
+    "metric": "required_runner_minutes",
+    "is_first_improvement": true,
+    "minimum_gain_percent": 5.0,
+    "practical_win_rule": "A practical win requires all three matched pairs to reduce required runner minutes and the mean reduction to be at least 5%. This is a project decision rule, not proof of statistical certainty.",
+    "minimum_samples": 3,
+    "max_run_pairs": 3,
+    "max_attempts": 3,
+    "max_experiment_minutes": 1440,
+    "highlight_below_percent": 1.0,
+    "uncertainty_method": "Report a paired t-based 95% confidence interval for the mean runner-minute reduction alongside all three pair results. With only three pairs, label the interval exploratory; it does not determine the practical win verdict and is not proof of statistical certainty.",
+    "confidence_interval_method": "Report a paired 95% confidence interval for the mean runner-minute reduction alongside all three pair results. Treat it as exploratory with only three pairs; it does not determine the practical win verdict and must not be described as proof of statistical certainty.",
+    "comparison_conditions": [
+      "Run baseline and candidate on the same workflow revision.",
+      "Use the same runner type and dependency/cache conditions for each pair.",
+      "Run the full required workflow matrix; do not omit required matrix cells.",
+      "Aggregate required_runner_minutes by summing runner minutes across all required jobs and matrix cells.",
+      "The experiment time cap measures elapsed wall-clock time, not summed runner minutes.",
+      "Keep queue delay separate from runner time."
+    ],
+    "stop_conditions": [
+      "Stop if any required check is disabled, removed, or fails.",
+      "Stop when the configured attempt, run-pair, or time budget is exhausted.",
+      "Stop and request human input when required context or access is missing."
+    ]
+  }
+}

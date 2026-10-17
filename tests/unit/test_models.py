@@ -60,6 +60,25 @@ def test_success_contract_requires_checks_and_feasible_sample_count():
         )
 
 
+def test_later_success_contract_can_use_any_real_positive_improvement():
+    contract = SuccessContract(
+        goal_id="goal-1",
+        version=2,
+        required_checks=(RequiredCheck(name="tests"),),
+        is_first_improvement=False,
+        minimum_gain_percent=0,
+    )
+    assert contract.highlight_below_percent == 1.0
+    with pytest.raises(ValidationError, match="later improvements require"):
+        SuccessContract(
+            goal_id="goal-1",
+            version=2,
+            required_checks=(RequiredCheck(name="tests"),),
+            is_first_improvement=False,
+            minimum_gain_percent=5.0,
+        )
+
+
 def test_proposal_computes_and_checks_patch_fingerprint():
     proposal = Proposal(
         experiment_id="exp-1",
