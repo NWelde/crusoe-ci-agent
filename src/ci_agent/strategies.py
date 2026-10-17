@@ -12,6 +12,9 @@ from dataclasses import dataclass
 
 import yaml
 
+from ci_agent.workflows.matrix import matrix_cells
+from ci_agent.workflows.usage import EFFECT, HISTORY, SETUP_RUNTIME, job_usage, step_usage
+
 
 def parse(raw):
     value = yaml.safe_load(raw)
@@ -29,10 +32,10 @@ class Strategy:
     transform: Callable
     coverage_factory: Callable | None = None
 
-    def propose(self, baseline):
+    def propose(self, baseline, source_evidence=None):
         before = parse(baseline)
         after = deepcopy(before)
-        evidence = self.transform(after)
+        evidence = self.transform(after, source_evidence or {})
         if not evidence or after == before:
             return None
         return {
@@ -43,142 +46,288 @@ class Strategy:
             "risks": ["Eligibility is structural; timing benefit requires measurement."],
         }
 
-    def validate(self, baseline, candidate):
-        expected = self.propose(baseline)
+    def validate(self, baseline, candidate, source_evidence=None):
+        expected = self.propose(baseline, source_evidence)
         if expected is None or parse(candidate) != parse(expected["candidate_workflow"]):
             raise ValueError(
                 f"{self.name}: candidate fails eligibility or exact transformation validation"
             )
 
 
-def literal_job(job):
-    """Prove no file, output, artifact, or action dependency: literal logging only."""
-    if set(job) - {"name", "runs-on", "steps", "needs", "if", "timeout-minutes", "strategy"}:
-        return False
-    if job.get("runs-on") not in ("ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04"):
-        return False
-    if "strategy" in job:
-        strategy = job["strategy"]
-        if set(strategy) != {"matrix"} or not isinstance(strategy["matrix"], dict):
+def safe_context(value, job):
+    """Accept ordinary CI environment/defaults, reject hidden execution hooks."""
+    for scope in (value, job, *job.get("steps", [])):
+        env = scope.get("env", {})
+        if not isinstance(env, dict) or any(
+            k.upper()
+            in {
+                "BASH_ENV",
+                "ENV",
+                "SHELLOPTS",
+                "BASHOPTS",
+                "NODE_OPTIONS",
+                "PYTHONSTARTUP",
+            }
+            for k in env
+        ):
             return False
+        defaults = scope.get("defaults", {}).get("run", {})
+        if defaults.get("shell", "bash") not in ("bash", "sh"):
+            return False
+    return True
+
+
+def isolated_runner(job):
+    runner = job.get("runs-on")
+    if isinstance(runner, str) and re.fullmatch(
+        r"(ubuntu|windows|macos)-(latest|[0-9.]+)(-arm)?", runner
+    ):
+        return True
+    if runner == "${{ matrix.os }}":
+        matrix = job.get("strategy", {}).get("matrix", {})
+        try:
+            cells = matrix_cells(matrix)
+        except ValueError:
+            return False
+        return bool(cells) and all(isolated_runner({"runs-on": cell.get("os")}) for cell in cells)
+    return False
+
+
+def ci_job(value, job, sources):
+    """Classify ordinary build/lint/test jobs rather than requiring echo commands."""
+    if not job.get("steps") or not isolated_runner(job) or not safe_context(value, job):
+        return None
+    if any(k in job for k in ("environment", "uses", "container")):
+        return None
+    if EFFECT.search(str(value.get("env", {}))):
+        return None
+    permissions = job.get("permissions", value.get("permissions", {}))
+    if permissions == "write-all" or (
+        isinstance(permissions, dict) and "write" in permissions.values()
+    ):
+        return None
+    usage = job_usage(job, sources.get("files", {}), value.get("defaults"))
+    if usage.unsafe or usage.unknown:
+        return None
+    return usage
+
+
+def parallelism(value, sources=None):
+    sources = sources or {}
+    evidence = []
+    for name, job in value["jobs"].items():
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        if not needs or job.get("if") not in (
+            "always()",
+            "${{ always() }}",
+            "!cancelled()",
+            "${{ !cancelled() }}",
+        ):
+            continue
+        endpoints = [job, *(value["jobs"].get(n, {}) for n in needs)]
+        usages = [ci_job(value, endpoint, sources) for endpoint in endpoints]
+        # Isolated job workspaces are not shared, but artifacts, outputs, secrets,
+        # explicit needs references and lifecycle effects are real dependencies.
+        text = str(endpoints)
+        if any(u is None for u in usages) or re.search(
+            r"needs\s*[.\[]|download-artifact|upload-artifact|secrets[.\[]", text, re.IGNORECASE
+        ):
+            continue
+        if any(endpoint.get("outputs") for endpoint in endpoints):
+            continue
         if any(
-            not isinstance(v, list) or not v or any(not isinstance(x, (str, int, float)) for x in v)
-            for k, v in strategy["matrix"].items()
-            if k != "exclude"
+            endpoint.get("concurrency")
+            or any(
+                re.search(r"\b(?:success|failure|cancelled)\s*\(", str(step.get("if", "")))
+                for step in endpoint.get("steps", [])
+            )
+            for endpoint in endpoints
         ):
-            return False
-    return bool(job.get("steps")) and all(
-        set(step) <= {"name", "run"}
-        and isinstance(step.get("run"), str)
-        and re.fullmatch(r"echo [A-Za-z0-9 ._-]+", step["run"])
-        for step in job["steps"]
-    )
+            continue
+        del job["needs"]
+        evidence.append(
+            f"{name}: failure-independent condition retained; hosted isolated workspaces; no upstream outputs/artifacts or lifecycle consumers"
+        )
+        evidence.extend(item for usage in usages for item in usage.evidence)
+    return evidence
 
 
-def parallelism(value):
-    if value.get("env") or value.get("defaults"):
-        return []
+def action_base(step):
+    return str(step.get("uses", "")).split("@")[0].lower()
+
+
+def checkout(value, sources=None):
+    sources = sources or {}
+    files = sources.get("files", {})
     evidence = []
     for name, job in value["jobs"].items():
-        # always() preserves execution after upstream failure. Literal jobs cannot
-        # consume upstream outputs/artifacts or require success-dependent gating.
-        if (
-            job.get("needs")
-            and job.get("if") in ("always()", "${{ always() }}")
-            and literal_job(job)
-        ):
-            needs = job["needs"]
-            needs = [needs] if isinstance(needs, str) else needs
-            if all(n in value["jobs"] and literal_job(value["jobs"][n]) for n in needs):
-                del job["needs"]
+        if not safe_context(value, job):
+            continue
+        steps = job.get("steps", [])
+        # Redundant checkout elimination is command-agnostic: arbitrary real
+        # build/test steps after the retained checkout are unchanged.
+        for i in range(len(steps) - 2, -1, -1):
+            first, second = steps[i], steps[i + 1]
+            if (
+                action_base(first) == "actions/checkout"
+                and "id" not in first
+                and {k: v for k, v in first.items() if k != "name"}
+                == {k: v for k, v in second.items() if k != "name"}
+            ):
+                steps.pop(i)
                 evidence.append(
-                    f"{name}: always() and all dependency endpoints contain literal logging only"
+                    f"{name}: adjacent identical checkout has no intervening consumer; retained checkout and all build/test commands unchanged"
                 )
+        indices = [i for i, step in enumerate(steps) if action_base(step) == "actions/checkout"]
+        if len(indices) != 1:
+            continue
+        index = indices[0]
+        step = steps[index]
+        probe = deepcopy(job)
+        probe["steps"].pop(index)
+        usage = job_usage(probe, files, value.get("defaults"))
+        if (
+            not usage.workspace
+            and not usage.unknown
+            and not usage.history
+            and "id" not in step
+            and set(step) <= {"uses", "name"}
+        ):
+            steps.pop(index)
+            evidence.append(f"{name}: no remaining command/action reads the checkout working tree")
+            continue
+        options = step.get("with", {})
+        # A shallow candidate retains checkout, all repository files and all
+        # commands. Full-source and command/config evidence rules out known
+        # history consumers; complete baseline/candidate checks must still pass.
+        if (
+            str(options.get("fetch-depth")) == "0"
+            and sources.get("complete")
+            and not usage.history
+            and not usage.unknown
+            and not any(HISTORY.search(content) for content in files.values())
+            and not any(
+                key in options
+                for key in ("ref", "repository", "submodules", "lfs", "sparse-checkout")
+            )
+        ):
+            step["with"]["fetch-depth"] = 1
+            evidence.append(
+                f"{name}: full source inventory and resolved commands/configuration contain no known Git-history/versioning consumer; preserve working tree and use depth 1"
+            )
+            evidence.extend(usage.evidence)
     return evidence
 
 
-def checkout(value):
-    if value.get("env") or value.get("defaults"):
-        return []
+def setup(value, sources=None):
+    sources = sources or {}
+    files = sources.get("files", {})
     evidence = []
     for name, job in value["jobs"].items():
-        steps = job.get("steps", [])
-        indices = [i for i, step in enumerate(steps) if step == {"uses": "actions/checkout@v4"}]
-        if len(indices) != 1:
+        if not safe_context(value, job):
             continue
-        probe = deepcopy(job)
-        probe["steps"].pop(indices[0])
-        if literal_job(probe):
-            job["steps"].pop(indices[0])
-            evidence.append(
-                f"{name}: every remaining step is literal echo; no working-tree consumer"
-            )
-    return evidence
-
-
-def setup(value):
-    if value.get("env") or value.get("defaults"):
-        return []
-    evidence = []
-    for name, job in value["jobs"].items():
         steps = job.get("steps", [])
-        indices = [
-            i
-            for i, step in enumerate(steps)
-            if set(step) == {"uses", "with"}
-            and step["uses"] in ("actions/setup-node@v4", "actions/setup-python@v5")
-            and set(step["with"])
-            == ({"node-version"} if "node" in step["uses"] else {"python-version"})
-            and isinstance(next(iter(step["with"].values())), str)
-            and re.fullmatch(r"\d+(\.\d+)*", next(iter(step["with"].values())))
-        ]
-        if len(indices) != 1:
-            continue
-        probe = deepcopy(job)
-        probe["steps"].pop(indices[0])
-        if literal_job(probe):
-            job["steps"].pop(indices[0])
-            evidence.append(
-                f"{name}: runtime setup has no consumer; all remaining steps are literal echo"
-            )
+        for index in range(len(steps) - 1, -1, -1):
+            step = steps[index]
+            base = action_base(step)
+            runtime = SETUP_RUNTIME.get(base)
+            # Caches, outputs, custom installation hooks and conditions can be
+            # observable. Preserve them; only plain runtime selection is eligible.
+            allowed = {
+                "node-version",
+                "python-version",
+                "go-version",
+                "java-version",
+                "distribution",
+                "ruby-version",
+            }
+            if (
+                runtime is None
+                or "id" in step
+                or set(step) - {"uses", "with", "name"}
+                or not step.get("with")
+                or set(step["with"]) - allowed
+            ):
+                continue
+            later = None
+            consumed = False
+            for other in steps[index + 1 :]:
+                if action_base(other) == base and not other.get("if"):
+                    later = other
+                    break
+                usage = step_usage(
+                    other,
+                    files,
+                    job.get("defaults", value.get("defaults", {}))
+                    .get("run", {})
+                    .get("working-directory", ""),
+                )
+                if usage.unknown or runtime in usage.runtimes:
+                    consumed = True
+                    break
+            if later is not None and not consumed:
+                steps.pop(index)
+                evidence.append(
+                    f"{name}: {base} selection is overwritten by a later unconditional setup before any {runtime} consumer; final setup and arbitrary build/test commands retained"
+                )
+                continue
+            probe = deepcopy(job)
+            probe["steps"].pop(index)
+            usage = job_usage(probe, files, value.get("defaults"))
+            if (
+                sources.get("complete")
+                and not usage.unknown
+                and runtime not in usage.runtimes
+                and not any(
+                    re.search(r"\b" + re.escape(runtime) + r"\b", content, re.IGNORECASE)
+                    for content in files.values()
+                )
+            ):
+                steps.pop(index)
+                evidence.append(
+                    f"{name}: source inventory and resolved commands use {sorted(usage.runtimes)}; no {runtime} consumer or setup output/cache"
+                )
+            elif not usage.unknown and not usage.runtimes and not usage.workspace:
+                steps.pop(index)
+                evidence.append(f"{name}: no remaining command/action consumes runtime setup")
     return evidence
 
 
 CONCURRENCY = {
-    "group": "${{ github.workflow }}-${{ github.event.pull_request.number }}",
+    "group": "${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref) || github.run_id }}",
     "cancel-in-progress": True,
 }
 
 
-def cancellation(value):
-    if value.get("env") or value.get("defaults"):
+def cancellation(value, sources=None):
+    sources = sources or {}
+    trigger = value.get("on")
+    events = set(trigger) if isinstance(trigger, (dict, list)) else {trigger}
+    if not events.intersection({"pull_request", "push"}) or "concurrency" in value:
         return []
-    trigger = value.get("on", value.get(True))  # PyYAML YAML 1.1 boolean key
-    pr_only = (
-        trigger == "pull_request"
-        or trigger == ["pull_request"]
-        or (
-            isinstance(trigger, dict)
-            and set(trigger) == {"pull_request"}
-            and trigger["pull_request"] in (None, {})
-        )
-    )
-    if not pr_only or "concurrency" in value:
+    # PR validation can be cancelled; pushes, schedules, dispatches, release
+    # workflows and privileged lifecycle jobs remain unaffected.
+    if "pull_request_target" in events or any(
+        ci_job(value, job, sources) is None for job in value["jobs"].values()
+    ):
         return []
-    # Deployments, reusable workflows and privileged actions need lifecycle evidence.
-    if not all(literal_job(j) for j in value["jobs"].values()):
+    if EFFECT.search(str(value.get("env", {}))):
         return []
     value["concurrency"] = deepcopy(CONCURRENCY)
-    # Dispatch experiments must never cancel unrelated runs with a missing PR number.
-    value["concurrency"]["group"] = (
-        "${{ github.workflow_ref }}-${{ github.event.pull_request.number || github.run_id }}"
-    )
-    return [
-        "PR-only workflow; literal logging jobs have no deployment or cleanup side effects; group is per workflow and PR"
+    if events != {"pull_request"}:
+        value["concurrency"]["cancel-in-progress"] = (
+            "${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch') }}"
+        )
+    evidence = [
+        "Resolved build/test/install commands and known actions; no deployments, write permissions, secret consumers or unrecognized lifecycle commands; only obsolete runs of the same PR or pushed branch/event/workflow can cancel; tag/scheduled/dispatched runs are preserved"
     ]
+    for job in value["jobs"].values():
+        evidence.extend(job_usage(job, sources.get("files", {}), value.get("defaults")).evidence)
+    return evidence
 
 
-def readiness(value):
+def readiness(value, sources=None):
     evidence = []
     for name, job in value["jobs"].items():
         for service in job.get("services", {}).values():
@@ -227,12 +376,12 @@ REGISTRY = {
         ),
         Strategy(
             "checkout_reduction",
-            "Remove checkout only with exhaustive proof of no working-tree consumers.",
+            "Reduce checkout duplication/history only with command and source-usage evidence.",
             checkout,
         ),
         Strategy(
             "setup_removal",
-            "Remove runtime setup only with exhaustive proof of no runtime consumers.",
+            "Remove overwritten or unused runtime setup while preserving all build/test commands.",
             setup,
         ),
         Strategy(
@@ -258,31 +407,53 @@ RECOMMENDATIONS = {
 }
 
 
-def discover(baseline, allowed=None):
+def discover(baseline, allowed=None, source_evidence=None):
     allowed = set(REGISTRY if allowed is None else allowed)
     proposals, rejected = [], {}
     for name, strategy in REGISTRY.items():
-        proposal = strategy.propose(baseline) if name in allowed else None
+        proposal = strategy.propose(baseline, source_evidence) if name in allowed else None
         if proposal:
             proposals.append(proposal)
         else:
+            diagnostics = []
+            value = parse(baseline)
+            for job_name, job in value["jobs"].items():
+                usage = job_usage(
+                    job, (source_evidence or {}).get("files", {}), value.get("defaults")
+                )
+                if usage.unknown:
+                    diagnostics.append(
+                        f"{job_name}: unresolved command/action or missing script evidence"
+                    )
+                    diagnostics.extend(usage.evidence)
+                if usage.history and name == "checkout_reduction":
+                    diagnostics.append(f"{job_name}: Git-history consumer detected")
+                if (
+                    name == "parallelism"
+                    and job.get("needs")
+                    and job.get("if")
+                    not in ("always()", "${{ always() }}", "!cancelled()", "${{ !cancelled() }}")
+                ):
+                    diagnostics.append(f"{job_name}: preserve success/failure dependency gate")
             rejected[name] = (
                 "Contract does not permit strategy"
                 if name not in allowed
-                else "No structurally proven eligible change: " + strategy.evidence_requirement
+                else "No structurally proven eligible change: "
+                + strategy.evidence_requirement
+                + (" Details: " + "; ".join(dict.fromkeys(diagnostics)) if diagnostics else "")
             )
     return proposals, rejected
 
 
-def validate_strategy(name, baseline, candidate):
+def validate_strategy(name, baseline, candidate, source_evidence=None):
     if name not in REGISTRY:
         raise ValueError(f"Unsupported optimization: {name}")
-    REGISTRY[name].validate(baseline, candidate)
+    REGISTRY[name].validate(baseline, candidate, source_evidence)
 
 
-def validated_coverage(name, baseline, candidate):
+def validated_coverage(name, baseline, candidate, source_evidence=None):
     """Derive coverage from a fresh strategy validation, never saved report claims."""
-    validate_strategy(name, baseline, candidate)
+    validate_strategy(name, baseline, candidate, source_evidence)
     if REGISTRY[name].coverage_factory:
         return REGISTRY[name].coverage_factory(baseline, candidate)
     from ci_agent.experiments.live_loop import count_workflow_jobs

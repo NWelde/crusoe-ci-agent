@@ -40,20 +40,67 @@ def main():
 
 
 @main.command("strategies")
-@click.option("--workflow", required=True, type=click.Path(path_type=Path, exists=True))
+@click.option("--workflow", type=click.Path(path_type=Path, exists=True, dir_okay=False))
+@click.option("--repository", help="Inspect a remote repository read-only, e.g. OWNER/REPO.")
+@click.option("--revision", help="Pin remote discovery to an existing commit/ref.")
+@click.option("--workflow-path", help="Remote workflow path; omit to inspect all discovered workflows.")
 @click.option("--output", required=True, type=click.Path(path_type=Path))
-def strategies(workflow, output):
-    """Discover eligible transformations and explain rejections without running CI."""
+@click.option("--repository-root", type=click.Path(path_type=Path, exists=True, file_okay=False))
+def strategies(workflow, repository, revision, workflow_path, output, repository_root):
+    """Discover real CI opportunities and rejection evidence without dispatching runs."""
     from ci_agent.strategies import RECOMMENDATIONS, discover
+    from ci_agent.workflows.source_evidence import collect_sources, local_sources
 
-    proposals, rejected = discover(workflow.read_text(encoding="utf-8"))
-    output.mkdir(parents=True, exist_ok=False)
-    (output / "discovery.json").write_text(json.dumps({
-        "eligible": proposals, "rejected": rejected,
-        "recommendation_only": RECOMMENDATIONS,
-        "measurement": "No execution or savings measured",
-    }, indent=2) + "\n", encoding="utf-8")
-    click.echo(f"Eligible: {', '.join(p['optimization'] for p in proposals) or 'none'}. Evidence: {output}")
+    if bool(workflow) == bool(repository):
+        raise click.UsageError("Choose either --workflow or --repository")
+    try:
+        if repository:
+            if repository_root:
+                raise click.UsageError("--repository-root applies to local workflow discovery")
+            github = GitHubClient.from_git_credential()
+            owner, name = repository.split('/')
+            _, default_revision = github.default_branch(owner, name)
+            inspected_revision = revision or default_revision
+            # Resolve named refs before fetching sources so all reads share one immutable commit.
+            if revision:
+                inspected_revision = github._get(f'/repos/{owner}/{name}/commits/{revision}')['sha']
+            sources = collect_sources(github, repository, inspected_revision)
+            if workflow_path:
+                from ci_agent.github.fork_experiment import _content_text
+                workflows = [(workflow_path, _content_text(github.get_contents(owner, name, workflow_path, inspected_revision)))]
+            else:
+                workflows = [(path, raw) for path, raw in sources['files'].items()
+                             if path.startswith('.github/workflows/') and path.endswith(('.yml', '.yaml'))]
+        else:
+            if revision or workflow_path:
+                raise click.UsageError("--revision and --workflow-path require --repository")
+            if repository_root is None:
+                resolved_workflow = workflow.resolve()
+                repository_root = (resolved_workflow.parent.parent.parent
+                                   if resolved_workflow.parent.name == 'workflows'
+                                   and resolved_workflow.parent.parent.name == '.github'
+                                   else resolved_workflow.parent)
+            sources = local_sources(repository_root)
+            workflows = [(str(workflow), workflow.read_text(encoding='utf-8'))]
+        results = []
+        for path, raw in workflows:
+            proposals, rejected = discover(raw, source_evidence=sources)
+            results.append({'workflow': path, 'eligible': proposals, 'rejected': rejected})
+        payload = {
+            'evidence_class': 'READ_ONLY_REPOSITORY_DISCOVERY_NO_RUNS_OR_SAVINGS',
+            'repository': repository, 'workflows': results,
+            'recommendation_only': RECOMMENDATIONS, 'measurement': 'No execution or savings measured',
+            'source_analysis': {'revision': sources['revision'], 'complete': sources['complete'],
+                                'files_inspected': len(sources['files']), 'reason': sources.get('reason')},
+        }
+        if len(results) == 1:
+            payload.update(eligible=results[0]['eligible'], rejected=results[0]['rejected'])
+        output.mkdir(parents=True, exist_ok=False)
+        (output / 'discovery.json').write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8')
+    except (GitHubAPIError, OSError, ValueError, TypeError, KeyError) as exc:
+        raise click.ClickException(str(exc)) from None
+    names = sorted({p['optimization'] for result in results for p in result['eligible']})
+    click.echo(f"Eligible: {', '.join(names) or 'none'}. Evidence: {output}")
 
 
 @main.command("live-e2e")
@@ -114,6 +161,7 @@ def live_e2e(
                 encoding="utf-8"))["proposal"]["optimization"],
             resume=resume and execution.exists(),
             evaluation_mode=mode,
+            source_evidence_path=output / 'setup' / 'source-evidence.json',
         )
         if publish_draft:
             result = _publish_live_result(result, execution)

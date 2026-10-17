@@ -95,7 +95,9 @@ class FixtureGitHub:
     def workflow(self, *args):
         return {"id": "ci"}
 
-    def _get(self, path):
+    def _get(self, path, **kwargs):
+        if "/git/trees/" in path:
+            return {"tree": [], "truncated": False}
         if "/compare/" in path:
             return {"status": "ahead", "files": [{"filename": ".github/workflows/ci.yml"}]}
         branch = path.rsplit("/", 1)[1]
