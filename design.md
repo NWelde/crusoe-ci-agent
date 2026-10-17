@@ -8,7 +8,7 @@ Deployment update: Nathan wants the same deployment method as Shadow Runner. Reu
 
 Nathan has ended detailed architecture interviewing for now. The core architecture is sufficient to start repository setup and implementation. Remaining tuning choices should be made during implementation, recorded briefly, and must not block setup. This document remains a working design; its proposed data model may be simplified as code takes shape.
 
-Confirmed clock: first job start through completion of all required jobs, including waits between jobs. Initial GitHub queue delay is reported separately. All required jobs must pass; a fast failure is not a win.
+Confirmed clock: wall-clock time from the earliest required-job start through the latest required-job completion, including waits between jobs. Initial GitHub queue delay is reported separately. Summed runner time is secondary diagnostic data. Use exactly three matched baseline/candidate run pairs per experiment on the same runner. A 5% gain qualifies as a win; report every measured effect, even below that threshold. All required jobs must pass; a fast failure is not a win. No GitHub Actions minute or elapsed-time experiment budget has been agreed.
 
 Choose repetition counts, useful-gain thresholds, uncertainty calculation, polling interval and practical experiment caps while implementing against the selected demo repository. Save measurement rules before running the experiment; do not change grading after observing results. Ask Nathan only for material product choices or genuine blockers, not routine implementation tuning.
 
@@ -121,7 +121,7 @@ Crusoe is the reasoning service; GitHub Actions supplies test machines. SQLite s
 - A historical previous run can reveal an opportunity, but a win should be established with fresh original/changed comparisons under matched conditions. A single faster run is not sufficient evidence by itself. Repetitions, minimum useful gain and confidence method remain open.
 
 - Primary product claim: reduce workflow completion time and report seconds/minutes saved. Cost analysis is deferred; do not describe elapsed-time savings as proven money or total-compute savings.
-- Proposed precise measurement: elapsed execution span from first job start to last required job completion, with queue waiting reported separately. Final timing definition, useful-gain threshold, repetitions and uncertainty method still need agreement.
+- Confirmed precise measurement: elapsed wall-clock span from first required job start to last required job completion, with queue waiting reported separately. Three matched baseline/candidate run pairs are required. A 5% gain qualifies as a win, while all measured effects remain reportable. The uncertainty method still needs agreement.
 - Experiment-generated runs are evidence only: tag their origin and exclude them from new-idea triggers. Observe ordinary completed runs for new opportunities.
 - Give agents compact history summaries instead of replaying full logs: proposed edit, what worked or failed, why, measured effect and confidence interval when valid. Mark void/unmeasured outcomes explicitly; no interval is invented for invalid evidence.
 - Keep full raw evidence separately and include references in summaries so the Verifier can inspect it when needed.

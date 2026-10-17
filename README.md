@@ -4,7 +4,7 @@ Done Means Done hackathon project: continuously inspect GitHub Actions, propose 
 
 Status: runnable developer scaffold with locked dependencies, CLI smoke checks and project CI. Optimization agents and experiment workflows are not implemented yet.
 
-Read [design.md](design.md) for the working architecture and data-model graph.
+Read [design.md](design.md) for the working architecture and [docs/shared-contract.md](docs/shared-contract.md) for the implemented shared data contract.
 
 ## Structure
 
