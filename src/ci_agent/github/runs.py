@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -120,6 +121,98 @@ class GitHubClient:
             raise GitHubAPIError("GitHub write returned invalid JSON") from None
         if not isinstance(result, dict):
             raise GitHubAPIError("GitHub write returned an unexpected response shape")
+        return result
+
+    def authenticated_user(self) -> dict[str, Any]:
+        """Return the authenticated account identity without exposing its token."""
+        return self._get("/user")
+
+    def fork_repository(self, owner: str, repo: str, *, name: str | None = None) -> dict[str, Any]:
+        """Create a fork under the authenticated user; GitHub provisions it asynchronously."""
+        body = {"name": name} if name else None
+        return self._write("POST", f"/repos/{owner}/{repo}/forks", body=body, accepted=(202,))
+
+    def set_actions_enabled(self, owner: str, repo: str, enabled: bool = True) -> None:
+        self._write("PUT", f"/repos/{owner}/{repo}/actions/permissions",
+                    body={"enabled": enabled}, accepted=(204,))
+
+    def default_branch(self, owner: str, repo: str) -> tuple[str, str]:
+        repository = self.repository(owner, repo)
+        branch = str(repository.get("default_branch") or "")
+        if not branch:
+            raise GitHubAPIError("GitHub repository has no default branch")
+        ref = self._get(f"/repos/{owner}/{repo}/git/ref/heads/{branch}")
+        try:
+            return branch, str(ref["object"]["sha"])
+        except (KeyError, TypeError):
+            raise GitHubAPIError("GitHub default branch has no commit SHA") from None
+
+    def create_pull_request(
+        self, owner: str, repo: str, *, head: str, base: str, title: str, body: str,
+        draft: bool = True,
+    ) -> dict[str, Any]:
+        return self._write("POST", f"/repos/{owner}/{repo}/pulls", body={
+            "head": head, "base": base, "title": title, "body": body, "draft": draft,
+        }, accepted=(201,))
+
+    def wait_for_repository(self, owner: str, repo: str, *, timeout_seconds: int = 120,
+                            poll_seconds: float = 3) -> dict[str, Any]:
+        """Wait for GitHub to finish provisioning a newly created fork."""
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                return self.repository(owner, repo)
+            except GitHubAPIError as exc:
+                if "HTTP 404" not in str(exc):
+                    raise
+                time.sleep(poll_seconds)
+        raise TimeoutError(f"Fork {owner}/{repo} was not ready before timeout")
+
+    def workflow(self, owner: str, repo: str, path: str) -> dict[str, Any]:
+        """Find an active workflow by its full repository path."""
+        payload = self._get(f"/repos/{owner}/{repo}/actions/workflows")
+        workflows = payload.get("workflows")
+        if not isinstance(workflows, list):
+            raise GitHubAPIError("GitHub workflow response has no workflows list")
+        for workflow in workflows:
+            if workflow.get("path") == path and workflow.get("state") == "active":
+                return workflow
+        raise GitHubAPIError(f"No active workflow found at {path}")
+
+    def wait_for_dispatch_run(
+        self, owner: str, repo: str, workflow_id: str, branch: str, expected_sha: str,
+        *, dispatched_after: datetime, timeout_seconds: int = 240, poll_seconds: float = 5,
+    ) -> dict[str, Any]:
+        """Find the dispatch created after this call for the exact branch and SHA."""
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            for run in self.find_dispatch_run(owner, repo, workflow_id, branch):
+                created = _timestamp(run.get("created_at"), "created_at", int(run.get("id") or 0))
+                if (created and created >= dispatched_after and
+                        str(run.get("head_sha") or "") == expected_sha):
+                    return run
+            time.sleep(poll_seconds)
+        raise TimeoutError(f"No matching dispatched run appeared for branch {branch}")
+
+    def wait_for_run_completion(
+        self, owner: str, repo: str, run_id: int, *, timeout_seconds: int = 3600,
+        poll_seconds: float = 30,
+    ) -> dict[str, Any]:
+        """Poll one known Actions run until it completes or the timebox expires."""
+        if run_id <= 0:
+            raise ValueError("run_id must be positive")
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            run = self.get_run(owner, repo, run_id)
+            if run.get("status") == "completed":
+                return run
+            time.sleep(poll_seconds)
+        raise TimeoutError(f"GitHub Actions run {run_id} did not complete before timeout")
+
+    def full_run(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
+        """Return run metadata with all paginated jobs attached."""
+        result = self.get_run(owner, repo, run_id)
+        result["jobs"] = self.run_jobs(owner, repo, run_id)
         return result
 
     def create_branch(self, owner: str, repo: str, branch: str, source_sha: str) -> None:

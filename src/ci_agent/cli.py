@@ -20,6 +20,7 @@ from ci_agent.contracts import (
     save_contract,
 )
 from ci_agent.experiments.demo_loop import DemoRunConfig, run_demo
+from ci_agent.github.fork_experiment import dispatch_matched_runs, prepare_fork_experiment
 from ci_agent.github.runs import GitHubAPIError, GitHubClient, sample_runs
 from ci_agent.inference import CrusoeInference, InferenceError
 
@@ -242,3 +243,40 @@ def sample_github_runs(repository: str, workflow_id: str, limit: int, output: Pa
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     click.echo(f"Sampled {report['runs_returned']} runs from {repository} (read-only).")
     click.echo(f"Evidence: {output}")
+
+
+@main.command("fork-experiment")
+@click.option("--upstream", required=True, help="Source repository as OWNER/REPO.")
+@click.option("--workflow-path", required=True, help="Workflow path under .github/workflows/.")
+@click.option("--candidate-workflow", type=click.Path(path_type=Path, exists=True, dir_okay=False),
+              required=True, help="Reviewed candidate workflow YAML file.")
+@click.option("--baseline-workflow", type=click.Path(path_type=Path, exists=True, dir_okay=False),
+              help="Optional explicit baseline YAML; otherwise read from upstream.")
+@click.option("--run-key", required=True, help="Experiment identifier for fork/branch names.")
+@click.option("--output", type=click.Path(path_type=Path), default=Path("artifacts/fork-experiment"),
+              show_default=True)
+@click.option("--confirm-live-runs", is_flag=True,
+              help="Required: creates a fork and consumes GitHub Actions minutes.")
+def fork_experiment(upstream: str, workflow_path: str, candidate_workflow: Path,
+                    baseline_workflow: Path | None, run_key: str, output: Path,
+                    confirm_live_runs: bool) -> None:
+    """Create a retained isolated fork and collect matched Actions runs."""
+    if not confirm_live_runs:
+        raise click.UsageError("Pass --confirm-live-runs to create a fork and consume Actions minutes.")
+    try:
+        client = GitHubClient.from_git_credential()
+        candidate = candidate_workflow.read_text(encoding="utf-8")
+        baseline = baseline_workflow.read_text(encoding="utf-8") if baseline_workflow else None
+        fork = prepare_fork_experiment(
+            client, upstream, workflow_path, candidate, run_key=run_key,
+            baseline_workflow=baseline,
+        )
+        click.echo(f"Prepared {fork.repository} from {fork.base_sha}; dispatching matched runs.")
+        result = dispatch_matched_runs(client, fork)
+        output.mkdir(parents=True, exist_ok=True)
+        report_path = output / f"{run_key}-runs.json"
+        report_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        click.echo(f"Evidence: {report_path}")
+        click.echo(f"Fork retained: https://github.com/{fork.repository}")
+    except (GitHubAPIError, TimeoutError, OSError, ValueError, KeyError) as exc:
+        raise click.ClickException(str(exc)) from None
