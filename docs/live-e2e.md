@@ -1,4 +1,9 @@
-# Live JSONB end-to-end run
+# Live end-to-end run
+
+The integrated planner now selects among an [extensible strategy registry](optimization-strategies.md).
+The JSONB commands and historical evidence below illustrate the service-readiness
+strategy; it is no longer hardcoded. Other repositories require their own template
+workflow path and exact required job IDs/commands.
 
 The demo defaults to **Shadow Runner mode**: one baseline/candidate pair,
 workflow elapsed time, and a 5% observed-speedup threshold. `--publish-draft`

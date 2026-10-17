@@ -11,12 +11,13 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - run: lint
+      - run: echo lint
   tests:
     needs: lint
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - run: tests
+      - run: echo tests
 """
 
 

@@ -18,6 +18,7 @@ def write_live_report(output, report, proposal_path=None):
     lines = [
         "# Live CI experiment",
         "",
+        f"Evidence class: {report.get('evidence_class', 'LIVE_GITHUB_ACTIONS_RUNS')}",
         f"Execution status: **{_text(status)}**. Outcome: **{_text(report.get('outcome', 'pending'))}**.",
         "",
         (
@@ -28,6 +29,11 @@ def write_live_report(output, report, proposal_path=None):
         if completed
         else "The end-to-end measurement has not completed; this is partial execution evidence.",
     ]
+    timing = report.get('timing')
+    if timing:
+        lines += ["", "Timing quantities (seconds; null means unavailable):", "",
+                  "```json", json.dumps(timing, indent=2), "```",
+                  "Job span includes scheduling gaps; no causal savings or exact critical path is established."]
     if report.get("reason"):
         lines += ["", f"Reason: {_text(report['reason'])}"]
     if report.get("failed_checks"):
@@ -103,6 +109,13 @@ def write_live_report(output, report, proposal_path=None):
             f"| {link} | {_text(receipt.get('status', '?'))} "
             f"| {_text(run.get('conclusion', 'pending'))} | {len(run.get('jobs', []))} |"
         )
+    measured_timings = [
+        {"pair": receipt.get('pair'), "variant": receipt.get('variant'), **receipt['timing']}
+        for receipt in report.get('runs', []) if receipt.get('timing')
+    ]
+    if measured_timings:
+        lines += ["", "Observed queue, execution span and aggregate runner time (seconds):", "",
+                  "```json", json.dumps(measured_timings, indent=2), "```"]
     if report.get("pairs"):
         if shadow:
             pair = report["pairs"][0]

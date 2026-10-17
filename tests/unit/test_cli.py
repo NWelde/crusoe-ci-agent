@@ -23,6 +23,9 @@ def test_live_e2e_wires_reviewed_setup_to_pinned_execution(monkeypatch, tmp_path
     blocked = CliRunner().invoke(main, args)
     assert blocked.exit_code != 0
     setup.assert_not_called()
+    proposal = tmp_path / 'run' / 'setup' / 'proposal'
+    proposal.mkdir(parents=True)
+    (proposal / 'proposal.json').write_text('{"proposal": {"optimization": "service_readiness"}}')
     result = CliRunner().invoke(main, args + ["--confirm-live-runs"])
     assert result.exit_code == 0, result.output
     assert "Outcome: loss" in result.output

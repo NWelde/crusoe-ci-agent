@@ -82,15 +82,16 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - run: bundle exec rubocop
+      - run: echo lint
   tests:
     needs: lint
+    if: always()
     runs-on: ubuntu-24.04
     strategy:
       matrix:
         ruby: ['3.2', '3.3']
     steps:
-      - run: bundle exec rake spec
+      - run: echo tests
 """
 CANDIDATE = BASE.replace("    needs: lint\n", "")
 
@@ -120,7 +121,7 @@ def test_parallelism_preserves_matrix_and_steps():
 @pytest.mark.parametrize(
     "candidate",
     [
-        CANDIDATE.replace("bundle exec rake spec", "echo passed"),
+        CANDIDATE.replace("echo tests", "echo passed"),
         CANDIDATE.replace("['3.2', '3.3']", "['3.2']"),
         CANDIDATE.replace("ubuntu-24.04", "ubuntu-latest"),
         BASE,
@@ -164,8 +165,8 @@ def setup_live(tmp_path, monkeypatch):
         metric="required_runner_minutes",
         allowed_optimizations=["parallelism"],
         required_checks=[
-            SimpleNamespace(name="lint", command="bundle exec rubocop"),
-            SimpleNamespace(name="tests", command="bundle exec rake spec"),
+            SimpleNamespace(name="lint", command="echo lint"),
+            SimpleNamespace(name="tests", command="echo tests"),
         ],
     )
     sealed = SimpleNamespace(
@@ -310,7 +311,7 @@ def test_shadow_coordinator_dispatches_one_pair_and_records_failure(
 
 def test_preflight_rejection_makes_no_fork(tmp_path, monkeypatch):
     client, options, prepare = setup_live(tmp_path, monkeypatch)
-    options["candidate_path"].write_text(CANDIDATE.replace("bundle exec rake spec", "echo ok"))
+    options["candidate_path"].write_text(CANDIDATE.replace("echo tests", "echo ok"))
     with pytest.raises(ValueError):
         run_live(client, **options)
     prepare.assert_not_called()

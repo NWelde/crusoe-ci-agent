@@ -24,6 +24,10 @@ def report(tmp_path):
     (tmp_path / "baseline.yml").write_text(
         "jobs:\n  tests:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: 'true'\n"
     )
+    from ci_agent.strategies import REGISTRY
+    baseline = (tmp_path / 'baseline.yml').read_text().replace("      - run: 'true'", "      - uses: actions/checkout@v4\n      - run: echo tests")
+    (tmp_path / 'baseline.yml').write_text(baseline)
+    (tmp_path / 'candidate.yml').write_text(REGISTRY['checkout_reduction'].propose(baseline)['candidate_workflow'])
     result = {
         "cache_verification": {"matched": True, "pairs": [{"matched": True}] * 3},
         "status": "completed",
@@ -74,7 +78,7 @@ def report(tmp_path):
             for index in range(6)
         ],
         "contract": sealed.model_dump(mode="json"),
-        "inputs": {"workflow_path": ".github/workflows/ci.yml"},
+        "inputs": {"workflow_path": ".github/workflows/ci.yml", "optimization": "checkout_reduction"},
         "source_verification": {
             "shared_source_sha": "common",
             "workflow_only_differences": [

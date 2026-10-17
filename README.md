@@ -1,6 +1,6 @@
 # CI improvement agent
 
-Done Means Done hackathon project: continuously inspect GitHub Actions, propose caching or parallelism improvements, verify results independently, and open evidence-backed PRs in a team-controlled fork.
+Done Means Done hackathon project: continuously inspect GitHub Actions, propose evidence-backed workflow improvements, verify results independently, and open evidence-backed PRs in a team-controlled fork.
 
 Status: live contract/proposal generation, independent review, bounded real-run
 execution, resumable evidence collection, independent evaluation, and gated
@@ -12,6 +12,14 @@ defaults to the one-pair Shadow Runner policy; its review draft is
 
 Read [design.md](design.md) for the working architecture and [docs/shared-contract.md](docs/shared-contract.md) for the implemented shared data contract.
 
+
+## Optimization strategy registry
+
+The normal `live-e2e` path now discovers and selects among five evidence-gated
+non-cache transformations. See [supported strategies, CLI and fixture demo](docs/optimization-strategies.md)
+for exact eligibility limits and reproducible integration runs. `ci-agent strategies`
+reports eligible changes and rejection reasons without dispatching CI.
+
 ## Live bounded experiments
 
 `ci-agent live-e2e` pins the real upstream workflow, asks Crusoe to generate and
@@ -20,11 +28,11 @@ edit locally, and compares one real baseline/candidate pair using elapsed time.
 Shadow mode is the demo default, with a 5% observed-speedup threshold and no
 statistical-confidence claim. `--mode research` retains three pairs, summed
 runner minutes, cache verification, and strict publication gates.
-The first supported generated optimization
-shortens PostgreSQL service health polling from 10 seconds to 1 second and
-increases retries from 5 to 50. It preserves every test, matrix cell, command,
-runner type, service probe, and timeout. This preserves the nominal polling
-budget, not the strict worst-case failure deadline when probes consume timeout.
+The registry selects among dependency parallelism, checkout reduction, unused setup
+removal, cancellation of superseded runs, and PostgreSQL readiness polling when
+its structural evidence requirements are satisfied. The original JSONB example
+uses readiness polling; ordinary test workloads often need stronger dependency
+proof before other strategies can apply. No eligible change means no dispatch.
 
 ```sh
 uv run ci-agent live-e2e --repository madeintandem/jsonb_accessor --fork-repository NWelde/jsonb_accessor --common-source-files artifacts/e2e-jsonb/baseline-fixes.json --output artifacts/new-live-e2e --confirm-live-runs
@@ -166,4 +174,3 @@ store.save_experiment(experiment)
 ```
 
 Records are stored as their versioned JSON payload alongside indexed IDs and lookup fields. Foreign keys are enabled, migrations are versioned, and writes use SQLite transactions. Events are append-only and deduplicated by `event_key`; verdicts are retained by evidence fingerprint and evaluation method; evidence references are deduplicated within an experiment. `list_experiments(workflow_id=..., statuses=(...))`, `list_events`, `list_verdicts`, and `list_evidence` retrieve prior history. Use `:memory:` for an ephemeral database. Credentials and raw logs do not belong in the database; store redacted references to external evidence instead.
-

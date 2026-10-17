@@ -2,8 +2,9 @@
 
 import math
 import statistics
-from collections import Counter
 from datetime import datetime
+
+from ci_agent.experiments.coverage import coverage_signature, expected_count, runner_signature
 
 
 def evaluate_experiment(pairs, contract, expected_jobs=None):
@@ -22,6 +23,7 @@ def evaluate_experiment(pairs, contract, expected_jobs=None):
     revisions = {}
     results = []
     missing_labels = False
+    job_counts = {}
     for pair in pairs:
         totals = []
         runner_labels = []
@@ -37,11 +39,12 @@ def evaluate_experiment(pairs, contract, expected_jobs=None):
             if not revision or revisions.setdefault(variant, revision) != revision:
                 raise ValueError("Each variant must use one immutable source revision")
             jobs = run.get("jobs", [])
-            if not jobs or (expected_jobs is not None and len(jobs) != expected_jobs):
+            job_counts[variant] = len(jobs)
+            if not jobs or (expected_jobs is not None and len(jobs) != expected_count(expected_jobs, variant)):
                 raise ValueError("Full expected job coverage is required")
             if len({job.get("id") for job in jobs}) != len(jobs):
                 raise ValueError("Duplicate job IDs in run evidence")
-            names = Counter(job.get("name") for job in jobs)
+            names = coverage_signature(jobs, expected_jobs, variant)
             if None in names or (coverage is not None and names != coverage):
                 raise ValueError("Job coverage differs across the six runs")
             coverage = names
@@ -73,7 +76,7 @@ def evaluate_experiment(pairs, contract, expected_jobs=None):
             if duration <= 0:
                 raise ValueError("Total runner duration must be positive")
             totals.append(duration / 60)
-            runner_labels.append(Counter(labels))
+            runner_labels.append(runner_signature(jobs, expected_jobs, variant))
         if runner_labels[0] != runner_labels[1]:
             raise ValueError("Baseline and candidate runner labels differ")
         results.append(
@@ -101,7 +104,9 @@ def evaluate_experiment(pairs, contract, expected_jobs=None):
         "verification": {
             "method": "independent raw-evidence recomputation",
             "distinct_runs": len(seen_runs),
-            "jobs_per_run": sum(coverage.values()),
+            "jobs_per_run": job_counts["baseline"],
+            "jobs_per_variant": job_counts,
+            "coverage_units": sum(coverage.values()),
             "runner_labels_verified": not missing_labels,
             "interval_is_exploratory": True,
             "limitations": [
