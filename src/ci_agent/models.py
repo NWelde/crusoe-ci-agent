@@ -134,7 +134,10 @@ class SuccessContract(ContractModel):
     goal_id: str
     version: int = Field(ge=1)
     objective: str = "Reduce CI runner minutes while keeping required checks enabled and passing."
-    allowed_optimizations: tuple[str, ...] = ("caching", "parallelism", "runner_sizing")
+    allowed_optimizations: tuple[str, ...] = (
+        "caching", "parallelism", "runner_sizing", "checkout_reduction",
+        "setup_removal", "superseded_cancellation", "service_readiness",
+    )
     required_checks: tuple[RequiredCheck, ...]
     # User wait time from first required job start through last required job completion.
     metric: str = "required_runner_minutes"

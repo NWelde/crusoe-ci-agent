@@ -64,10 +64,11 @@ def publish_verified_draft(client, report, output):
             "paths"
         ) != [workflow_path]:
             raise ValueError("Source audit does not match the measured variant revisions")
-    from ci_agent.experiments.live_loop import count_workflow_jobs, workflow
-
     baseline = (output / "baseline.yml").read_text(encoding="utf-8")
-    expected = count_workflow_jobs(baseline, list(workflow(baseline)["jobs"]))
+    from ci_agent.strategies import validated_coverage
+
+    expected = validated_coverage(report['inputs']['optimization'], baseline,
+                      (output / 'candidate.yml').read_text(encoding='utf-8'))
     raw_pairs = []
     for index in range(1, 4):
         raw_pair = {}

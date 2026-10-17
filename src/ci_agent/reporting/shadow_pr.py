@@ -23,19 +23,12 @@ def publish_shadow_draft(client, report, output):
     for variant, run in raw.items():
         if run.get("head_sha") != fork[f"{variant}_sha"]:
             raise ValueError("Run revision differs from the proposed branch")
-    from ci_agent.experiments.live_loop import count_workflow_jobs, workflow
-
     baseline = (output / "baseline.yml").read_text(encoding="utf-8")
     candidate = (output / "candidate.yml").read_text(encoding="utf-8")
-    if report["inputs"].get("optimization") == "service_readiness":
-        from ci_agent.experiments.live_proposal import validate_service_polling
+    from ci_agent.strategies import validated_coverage
 
-        validate_service_polling(baseline, candidate)
-    else:
-        from ci_agent.experiments.live_loop import validate_parallelism
-
-        validate_parallelism(baseline, candidate, list(workflow(baseline)["jobs"]))
-    expected = count_workflow_jobs(baseline, list(workflow(baseline)["jobs"]))
+    optimization = report["inputs"].get("optimization")
+    expected = validated_coverage(optimization, baseline, candidate)
     measured = evaluate_shadow_pair(raw["baseline"], raw["candidate"], expected)
     if any(report.get(k) != v for k, v in measured.items()):
         raise ValueError("Demo summary differs from raw run evidence")
@@ -54,14 +47,12 @@ def publish_shadow_draft(client, report, output):
         if current["object"]["sha"] != fork[variant + "_sha"]:
             raise ValueError("Experiment branch moved after measurement")
     description = (
-        "Reduce PostgreSQL health polling interval from 10s to 1s and increase retries from 5 to 50. "
-        "All test commands and the full matrix are preserved. The nominal polling budget is preserved; "
-        "slow failed probes can extend the worst-case failure window."
-        if report["inputs"].get("optimization") == "service_readiness"
-        else "Allow independent CI jobs to run concurrently while preserving every required job and command."
+        f"Strategy: {optimization}. The workflow passed its strategy-specific structural validator. "
+        "All required check identities and command coverage are preserved."
     )
     body = [
         "Demo comparison for human review.",
+        f"Evidence class: {report.get('evidence_class', 'LIVE_GITHUB_ACTIONS_RUNS')}",
         "",
         description,
         "",

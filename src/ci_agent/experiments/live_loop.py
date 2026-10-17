@@ -6,7 +6,6 @@ import itertools
 import json
 import time
 import zipfile
-from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -54,39 +53,25 @@ def count_workflow_jobs(raw, checks):
 
 
 def validate_parallelism(baseline, candidate, checks):
-    """Allow only removal of job dependencies; preserve every executable step."""
-    before, after = workflow(baseline), workflow(candidate)
-    if not set(checks).issubset(before["jobs"]):
-        raise ValueError("Required checks must identify workflow job IDs")
-    expected = count_workflow_jobs(baseline, checks)
-    changed = False
-    for name, job in before["jobs"].items():
-        other = after["jobs"].get(name)
-        if not isinstance(other, dict):
-            raise TypeError("Jobs cannot be removed")
-        old_needs, new_needs = job.get("needs", []), other.get("needs", [])
-        old_needs = [old_needs] if isinstance(old_needs, str) else old_needs
-        new_needs = [new_needs] if isinstance(new_needs, str) else new_needs
-        if not set(new_needs).issubset(old_needs):
-            raise ValueError("Only removing dependencies is supported")
-        changed |= old_needs != new_needs
-        job.pop("needs", None)
-        other.pop("needs", None)
-    if before != after or not changed:
-        raise ValueError("Candidate must change only job dependencies")
-    return expected
+    """Validate only dependency removals whose soundness is structurally proven."""
+    from ci_agent.strategies import validate_strategy
+
+    validate_strategy('parallelism', baseline, candidate)
+    return count_workflow_jobs(baseline, checks)
 
 
 def evaluate_pair(baseline, candidate, expected):
     """Require complete successful runs and identical job coverage before timing."""
+    from ci_agent.experiments.coverage import coverage_signature, expected_count
+
     totals = []
-    for run in (baseline, candidate):
+    for variant, run in (('baseline', baseline), ('candidate', candidate)):
         jobs = run.get("jobs", [])
         if (
             run.get("status") != "completed"
             or run.get("conclusion") != "success"
-            or len(jobs) != expected
-            or len({j["id"] for j in jobs}) != expected
+            or len(jobs) != expected_count(expected, variant)
+            or len({j["id"] for j in jobs}) != len(jobs)
             or any(j.get("conclusion") != "success" for j in jobs)
         ):
             raise ValueError("Required checks failed or complete job coverage is missing")
@@ -99,8 +84,8 @@ def evaluate_pair(baseline, candidate, expected):
         if any(d < 0 for d in durations) or sum(durations) <= 0:
             raise ValueError("Invalid job durations")
         totals.append(sum(durations) / 60)
-    if Counter(j["name"] for j in baseline["jobs"]) != Counter(
-        j["name"] for j in candidate["jobs"]
+    if coverage_signature(baseline["jobs"], expected, "baseline") != coverage_signature(
+        candidate["jobs"], expected, "candidate"
     ):
         raise ValueError("Baseline and candidate job coverage differs")
     return {
@@ -205,7 +190,7 @@ def _run_live(
     if contract.metric != "required_runner_minutes":
         raise ValueError("Unsupported contract metric")
     report = {
-        "evidence_class": "LIVE_GITHUB_ACTIONS_RUNS",
+        "evidence_class": getattr(type(client), "evidence_class", "LIVE_GITHUB_ACTIONS_RUNS"),
         "status": "preflight",
         "contract": sealed.model_dump(mode="json"),
         "pairs": [],
@@ -267,7 +252,6 @@ def _run_live(
         save()
         baseline = _content_text(client.get_contents(owner, repo, workflow_path, sha))
         candidate = candidate_path.read_text(encoding="utf-8")
-        checks = [c.name for c in contract.required_checks]
         for check in contract.required_checks:
             job = workflow(baseline)["jobs"].get(check.name, {})
             commands = [step.get("run", "").strip() for step in job.get("steps", [])]
@@ -276,14 +260,9 @@ def _run_live(
             ):
                 raise ValueError("Contract commands do not match the target workflow")
         # All workflow jobs must be measured, including any undeclared helper jobs.
-        if optimization == "service_readiness":
-            from ci_agent.experiments.live_proposal import validate_service_polling
+        from ci_agent.strategies import validated_coverage
 
-            validate_service_polling(baseline, candidate)
-            expected = count_workflow_jobs(baseline, list(workflow(baseline)["jobs"]))
-        else:
-            expected = validate_parallelism(baseline, candidate, list(workflow(baseline)["jobs"]))
-            validate_parallelism(baseline, candidate, checks)
+        expected = validated_coverage(optimization, baseline, candidate)
         (output / "baseline.yml").write_text(baseline, encoding="utf-8")
         (output / "candidate.yml").write_text(candidate, encoding="utf-8")
 
@@ -414,7 +393,8 @@ def _run_live(
                     if run.get("head_sha") != revision:
                         raise ValueError("Saved run revision does not match prepared branch")
                     if evaluation_mode != "shadow":
-                        evaluate_pair(run, run, expected)
+                        from ci_agent.experiments.coverage import expected_count
+                        evaluate_pair(run, run, expected_count(expected, variant))
                     pair.append(run)
                     continue
                 dispatched = datetime.now(UTC)
@@ -464,7 +444,9 @@ def _run_live(
                     fork.owner, fork.name, appeared["id"], timeout_seconds=remaining()
                 )
                 run = client.full_run(fork.owner, fork.name, appeared["id"])
-                receipt.update(status="collected", evidence=run)
+                from ci_agent.experiments.timing import run_timing
+
+                receipt.update(status="collected", evidence=run, timing=run_timing(run))
                 failures = [
                     {
                         "job_id": job["id"],
@@ -485,7 +467,8 @@ def _run_live(
                 if run.get("head_sha") != revision:
                     raise ValueError("Run source revision does not match prepared branch")
                 if evaluation_mode != "shadow":
-                    evaluate_pair(run, run, expected)
+                    from ci_agent.experiments.coverage import expected_count
+                    evaluate_pair(run, run, expected_count(expected, variant))
                 pair.append(run)
             if evaluation_mode == "shadow":
                 from ci_agent.experiments.shadow_mode import evaluate_shadow_pair

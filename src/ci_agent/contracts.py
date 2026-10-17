@@ -77,7 +77,10 @@ class ContractLimits(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    allowed_optimizations: tuple[str, ...] = ("caching", "parallelism")
+    allowed_optimizations: tuple[str, ...] = (
+        "caching", "parallelism", "checkout_reduction", "setup_removal",
+        "superseded_cancellation", "service_readiness",
+    )
     metric: str = "required_runner_minutes"
     is_first_improvement: bool = True
     minimum_gain_percent: float = Field(default=5.0, ge=0)

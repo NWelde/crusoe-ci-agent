@@ -2,13 +2,16 @@
 
 from datetime import datetime
 
+from ci_agent.experiments.coverage import coverage_signature, expected_count
+from ci_agent.experiments.timing import run_timing
+
 
 def evaluate_shadow_pair(baseline, candidate, expected_jobs):
     if not baseline.get("id") or not candidate.get("id") or baseline["id"] == candidate["id"]:
         raise ValueError("Two distinct real run IDs are required")
     durations = []
     checks = []
-    for run in (baseline, candidate):
+    for variant, run in (('baseline', baseline), ('candidate', candidate)):
         if run.get("status") != "completed":
             raise ValueError("Shadow comparison requires completed runs")
         start = datetime.fromisoformat(run.get("run_started_at") or run["created_at"])
@@ -20,11 +23,14 @@ def evaluate_shadow_pair(baseline, candidate, expected_jobs):
         jobs = run.get("jobs", [])
         checks.append(
             run.get("conclusion") == "success"
-            and len(jobs) == expected_jobs
-            and len({j["id"] for j in jobs}) == expected_jobs
+            and len(jobs) == expected_count(expected_jobs, variant)
+            and len({j["id"] for j in jobs}) == len(jobs)
             and all(j.get("conclusion") == "success" for j in jobs)
         )
     saved = durations[0] - durations[1]
+    if coverage_signature(baseline.get('jobs', []), expected_jobs, 'baseline') != coverage_signature(
+        candidate.get('jobs', []), expected_jobs, 'candidate'):
+        checks[1] = False
     percent = saved / durations[0] * 100
     outcome = (
         "inconclusive"
@@ -49,5 +55,6 @@ def evaluate_shadow_pair(baseline, candidate, expected_jobs):
         "metric": "workflow_elapsed_seconds",
         "sample_pairs": 1,
         "verified_optimization": False,
+        "timing": {"baseline": run_timing(baseline), "candidate": run_timing(candidate)},
         "evidence_limit": "Single-pair demo observation; cache and host conditions are uncontrolled.",
     }

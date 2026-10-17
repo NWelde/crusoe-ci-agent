@@ -25,6 +25,7 @@ from ci_agent.experiments.live_loop import run_live
 from ci_agent.github.fork_experiment import dispatch_matched_runs, prepare_fork_experiment
 from ci_agent.github.runs import GitHubAPIError, GitHubClient, sample_runs
 from ci_agent.inference import CrusoeInference, InferenceError
+from ci_agent.strategies import REGISTRY
 
 
 def _echo_console_safe(message: str) -> None:
@@ -36,6 +37,23 @@ def _echo_console_safe(message: str) -> None:
 @click.group()
 def main():
     """CI improvement agent: setup and diagnostics."""
+
+
+@main.command("strategies")
+@click.option("--workflow", required=True, type=click.Path(path_type=Path, exists=True))
+@click.option("--output", required=True, type=click.Path(path_type=Path))
+def strategies(workflow, output):
+    """Discover eligible transformations and explain rejections without running CI."""
+    from ci_agent.strategies import RECOMMENDATIONS, discover
+
+    proposals, rejected = discover(workflow.read_text(encoding="utf-8"))
+    output.mkdir(parents=True, exist_ok=False)
+    (output / "discovery.json").write_text(json.dumps({
+        "eligible": proposals, "rejected": rejected,
+        "recommendation_only": RECOMMENDATIONS,
+        "measurement": "No execution or savings measured",
+    }, indent=2) + "\n", encoding="utf-8")
+    click.echo(f"Eligible: {', '.join(p['optimization'] for p in proposals) or 'none'}. Evidence: {output}")
 
 
 @main.command("live-e2e")
@@ -92,7 +110,8 @@ def live_e2e(
                 if common_source_files
                 else None
             ),
-            optimization="service_readiness",
+            optimization=json.loads((output / "setup" / "proposal" / "proposal.json").read_text(
+                encoding="utf-8"))["proposal"]["optimization"],
             resume=resume and execution.exists(),
             evaluation_mode=mode,
         )
@@ -138,7 +157,7 @@ def live_e2e(
 @click.option("--source-revision", help="Pin the inspected upstream commit.")
 @click.option(
     "--optimization",
-    type=click.Choice(["parallelism", "service_readiness"]),
+    type=click.Choice(list(REGISTRY)),
     default="parallelism",
     show_default=True,
 )

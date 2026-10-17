@@ -13,7 +13,6 @@ from ci_agent.experiments.live_proposal import (
     LiveProposal,
     ProposalReview,
     generate_live_proposal,
-    validate_service_polling,
 )
 from ci_agent.github.fork_experiment import _content_text
 from ci_agent.github.runs import GitHubClient
@@ -55,11 +54,8 @@ def prepare_e2e(*, repository: str, output: Path, template: Path, resume: bool =
         repository_id=repository.replace('/', '-'), raw_yaml=baseline,
         content_fingerprint=hashlib.sha256(baseline.encode()).hexdigest(),
     )
-    payload['limits']['allowed_optimizations'] = ['service_readiness']
-    payload['goal']['constraints'].append(
-        'Service-readiness optimization may only shorten PostgreSQL health polling to 1s '
-        'with proportionally increased retries, preserving readiness command and timeout.'
-    )
+    from ci_agent.strategies import REGISTRY
+    payload['limits']['allowed_optimizations'] = list(REGISTRY)
     request = ContractRequest.model_validate(payload)
     (output / 'contract-request.json').write_text(request.model_dump_json(indent=2) + '\n', encoding='utf-8')
     (output / 'source.json').write_text(json.dumps({
@@ -78,8 +74,7 @@ def prepare_e2e(*, repository: str, output: Path, template: Path, resume: bool =
         sealed_contract=result.sealed_contract, output=output / 'proposal',
         evidence=(
             f'Workflow source is pinned to {sha}.',
-            'PostgreSQL readiness uses interval 10s, timeout 5s, retries 5.',
-            'Bundler caching is already enabled. No measured optimization savings are available.',
+            'No measured optimization savings are available.',
         ),
     )
     print(f'Reviewed candidate saved to {output / "proposal" / "candidate.yml"}', flush=True)
@@ -131,7 +126,10 @@ def _resume_e2e(*, repository: str, output: Path):
             or audit.get('proposer_context', {}).get('repository') != repository
         ):
             raise ValueError('Saved proposal or independent review is inconsistent')
-        validate_service_polling(baseline, candidate)
+        from ci_agent.strategies import validate_strategy
+        if proposal.optimization not in sealed.contract.allowed_optimizations:
+            raise ValueError('Saved strategy is outside contract')
+        validate_strategy(proposal.optimization, baseline, candidate)
         return source
     if (output / 'proposal').exists():
         raise ValueError('Incomplete or rejected proposal records must be inspected before retrying')
