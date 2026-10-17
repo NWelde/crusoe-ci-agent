@@ -30,7 +30,12 @@ class GitHubAPIError(RuntimeError):
 
 class GitHubClient:
     def __init__(
-        self, token: str, *, session: requests.Session | None = None, timeout: float = 30
+        self,
+        token: str,
+        *,
+        session: requests.Session | None = None,
+        timeout: float = 30,
+        read_retries: int | None = None,
     ) -> None:
         if not token.strip():
             raise ValueError("GITHUB_TOKEN is required")
@@ -39,6 +44,9 @@ class GitHubClient:
         self._token = token.strip()
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.read_retries = (2 if session is None else 0) if read_retries is None else read_retries
+        if self.read_retries < 0:
+            raise ValueError("read_retries cannot be negative")
 
     @classmethod
     def from_env(cls, *, dotenv_path: Path | None = None) -> GitHubClient:
@@ -56,19 +64,44 @@ class GitHubClient:
             result = subprocess.run(
                 ["git", "credential", "fill"],
                 input="protocol=https\nhost=github.com\n\n",
-                capture_output=True, text=True, timeout=15, check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=True,
             )
         except (OSError, subprocess.SubprocessError):
-            raise GitHubAPIError("No usable GitHub credential is available from Git Credential Manager") from None
-        fields = dict(
-            line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
-        )
+            raise GitHubAPIError(
+                "No usable GitHub credential is available from Git Credential Manager"
+            ) from None
+        fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         token = fields.get("password", "").strip()
         if not token:
             raise GitHubAPIError("Git Credential Manager returned no GitHub token")
         return cls(token)
 
     def _get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        for attempt in range(self.read_retries + 1):
+            try:
+                return self._get_once(path, params=params)
+            except GitHubAPIError as exc:
+                transient = any(
+                    marker in str(exc)
+                    for marker in (
+                        "ConnectionError",
+                        "Timeout",
+                        "HTTP 429",
+                        "HTTP 500",
+                        "HTTP 502",
+                        "HTTP 503",
+                        "HTTP 504",
+                    )
+                )
+                if not transient or attempt == self.read_retries:
+                    raise
+                time.sleep(0.5 * 2**attempt)
+        raise AssertionError("read retry loop must return or raise")
+
+    def _get_once(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             response = self.session.get(
                 f"{API_BASE}{path}",
@@ -83,7 +116,11 @@ class GitHubClient:
         except requests.RequestException as exc:
             raise GitHubAPIError(f"GitHub request failed ({type(exc).__name__})") from None
         if response.status_code != 200:
-            hint = "; check repository access or token scopes" if response.status_code in {401, 403, 404} else ""
+            hint = (
+                "; check repository access or token scopes"
+                if response.status_code in {401, 403, 404}
+                else ""
+            )
             raise GitHubAPIError(f"GitHub API returned HTTP {response.status_code}{hint}")
         try:
             result = response.json()
@@ -94,13 +131,19 @@ class GitHubClient:
         return result
 
     def _write(
-        self, method: str, path: str, *, body: dict[str, Any] | None = None,
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
         accepted: tuple[int, ...] = (200, 201, 202, 204),
     ) -> dict[str, Any]:
         """Issue one authenticated repository write; never include response bodies in errors."""
         try:
             response = self.session.request(
-                method, f"{API_BASE}{path}", json=body,
+                method,
+                f"{API_BASE}{path}",
+                json=body,
                 headers={
                     "Accept": "application/vnd.github+json",
                     "Authorization": f"Bearer {self._token}",
@@ -111,7 +154,11 @@ class GitHubClient:
         except requests.RequestException as exc:
             raise GitHubAPIError(f"GitHub write failed ({type(exc).__name__})") from None
         if response.status_code not in accepted:
-            hint = "; check token contents and pull-request write permissions" if response.status_code in {401, 403, 404} else ""
+            hint = (
+                "; check token contents and pull-request write permissions"
+                if response.status_code in {401, 403, 404}
+                else ""
+            )
             raise GitHubAPIError(f"GitHub API write returned HTTP {response.status_code}{hint}")
         if response.status_code == 204 or not response.content:
             return {}
@@ -133,8 +180,12 @@ class GitHubClient:
         return self._write("POST", f"/repos/{owner}/{repo}/forks", body=body, accepted=(202,))
 
     def set_actions_enabled(self, owner: str, repo: str, enabled: bool = True) -> None:
-        self._write("PUT", f"/repos/{owner}/{repo}/actions/permissions",
-                    body={"enabled": enabled}, accepted=(204,))
+        self._write(
+            "PUT",
+            f"/repos/{owner}/{repo}/actions/permissions",
+            body={"enabled": enabled},
+            accepted=(204,),
+        )
 
     def default_branch(self, owner: str, repo: str) -> tuple[str, str]:
         repository = self.repository(owner, repo)
@@ -148,15 +199,32 @@ class GitHubClient:
             raise GitHubAPIError("GitHub default branch has no commit SHA") from None
 
     def create_pull_request(
-        self, owner: str, repo: str, *, head: str, base: str, title: str, body: str,
+        self,
+        owner: str,
+        repo: str,
+        *,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
         draft: bool = True,
     ) -> dict[str, Any]:
-        return self._write("POST", f"/repos/{owner}/{repo}/pulls", body={
-            "head": head, "base": base, "title": title, "body": body, "draft": draft,
-        }, accepted=(201,))
+        return self._write(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls",
+            body={
+                "head": head,
+                "base": base,
+                "title": title,
+                "body": body,
+                "draft": draft,
+            },
+            accepted=(201,),
+        )
 
-    def wait_for_repository(self, owner: str, repo: str, *, timeout_seconds: int = 120,
-                            poll_seconds: float = 3) -> dict[str, Any]:
+    def wait_for_repository(
+        self, owner: str, repo: str, *, timeout_seconds: int = 120, poll_seconds: float = 3
+    ) -> dict[str, Any]:
         """Wait for GitHub to finish provisioning a newly created fork."""
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
@@ -180,22 +248,41 @@ class GitHubClient:
         raise GitHubAPIError(f"No active workflow found at {path}")
 
     def wait_for_dispatch_run(
-        self, owner: str, repo: str, workflow_id: str, branch: str, expected_sha: str,
-        *, dispatched_after: datetime, timeout_seconds: int = 240, poll_seconds: float = 5,
+        self,
+        owner: str,
+        repo: str,
+        workflow_id: str,
+        branch: str,
+        expected_sha: str,
+        *,
+        dispatched_after: datetime,
+        timeout_seconds: int = 240,
+        poll_seconds: float = 5,
     ) -> dict[str, Any]:
         """Find the dispatch created after this call for the exact branch and SHA."""
+        # GitHub serializes created_at to whole seconds. Comparing its timestamp
+        # to a fractional dispatch time would miss a run created in that second.
+        dispatched_after = dispatched_after.replace(microsecond=0)
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             for run in self.find_dispatch_run(owner, repo, workflow_id, branch):
                 created = _timestamp(run.get("created_at"), "created_at", int(run.get("id") or 0))
-                if (created and created >= dispatched_after and
-                        str(run.get("head_sha") or "") == expected_sha):
+                if (
+                    created
+                    and created >= dispatched_after
+                    and str(run.get("head_sha") or "") == expected_sha
+                ):
                     return run
             time.sleep(poll_seconds)
         raise TimeoutError(f"No matching dispatched run appeared for branch {branch}")
 
     def wait_for_run_completion(
-        self, owner: str, repo: str, run_id: int, *, timeout_seconds: int = 3600,
+        self,
+        owner: str,
+        repo: str,
+        run_id: int,
+        *,
+        timeout_seconds: int = 3600,
         poll_seconds: float = 30,
     ) -> dict[str, Any]:
         """Poll one known Actions run until it completes or the timebox expires."""
@@ -216,13 +303,26 @@ class GitHubClient:
         return result
 
     def create_branch(self, owner: str, repo: str, branch: str, source_sha: str) -> None:
-        self._write("POST", f"/repos/{owner}/{repo}/git/refs", body={
-            "ref": f"refs/heads/{branch}", "sha": source_sha,
-        }, accepted=(201,))
+        self._write(
+            "POST",
+            f"/repos/{owner}/{repo}/git/refs",
+            body={
+                "ref": f"refs/heads/{branch}",
+                "sha": source_sha,
+            },
+            accepted=(201,),
+        )
 
     def put_file(
-        self, owner: str, repo: str, path: str, content: str, message: str, branch: str,
-        *, existing_sha: str | None = None,
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        content: str,
+        message: str,
+        branch: str,
+        *,
+        existing_sha: str | None = None,
     ) -> dict[str, Any]:
         import base64
 
@@ -233,14 +333,25 @@ class GitHubClient:
         }
         if existing_sha:
             body["sha"] = existing_sha
-        return self._write("PUT", f"/repos/{owner}/{repo}/contents/{path}", body=body, accepted=(200, 201))
+        return self._write(
+            "PUT", f"/repos/{owner}/{repo}/contents/{path}", body=body, accepted=(200, 201)
+        )
 
     def create_draft_pull_request(
         self, owner: str, repo: str, *, head: str, base: str, title: str, body: str
     ) -> dict[str, Any]:
-        return self._write("POST", f"/repos/{owner}/{repo}/pulls", body={
-            "head": head, "base": base, "title": title, "body": body, "draft": True,
-        }, accepted=(201,))
+        return self._write(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls",
+            body={
+                "head": head,
+                "base": base,
+                "title": title,
+                "body": body,
+                "draft": True,
+            },
+            accepted=(201,),
+        )
 
     def branch_runs(
         self, owner: str, repo: str, workflow_id: str, branch: str, *, limit: int = 30
@@ -256,8 +367,10 @@ class GitHubClient:
 
     def dispatch_workflow(self, owner: str, repo: str, workflow_id: str, ref: str) -> None:
         self._write(
-            "POST", f"/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches",
-            body={"ref": ref}, accepted=(204,),
+            "POST",
+            f"/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches",
+            body={"ref": ref},
+            accepted=(204,),
         )
 
     def find_dispatch_run(
@@ -278,7 +391,9 @@ class GitHubClient:
     def get_contents(self, owner: str, repo: str, path: str, ref: str) -> dict[str, Any]:
         return self._get(f"/repos/{owner}/{repo}/contents/{path}", params={"ref": ref})
 
-    def open_pull_requests(self, owner: str, repo: str, *, head: str, base: str) -> list[dict[str, Any]]:
+    def open_pull_requests(
+        self, owner: str, repo: str, *, head: str, base: str
+    ) -> list[dict[str, Any]]:
         try:
             response = self.session.get(
                 f"{API_BASE}/repos/{owner}/{repo}/pulls",
@@ -368,27 +483,34 @@ def sample_runs(
             duration = (completed - started).total_seconds() if started and completed else None
             if duration is not None and duration < 0:
                 duration = None
-            jobs.append(JobSnapshot(
-                id=str(job["id"]), name=str(job.get("name") or ""),
-                status=str(job.get("status") or "unknown"),
-                conclusion=job.get("conclusion"), started_at=started,
-                completed_at=completed, duration_seconds=duration,
-            ))
+            jobs.append(
+                JobSnapshot(
+                    id=str(job["id"]),
+                    name=str(job.get("name") or ""),
+                    status=str(job.get("status") or "unknown"),
+                    conclusion=job.get("conclusion"),
+                    started_at=started,
+                    completed_at=completed,
+                    duration_seconds=duration,
+                )
+            )
         raw_id = str(raw["id"])
         workflow = str(raw.get("workflow_id") or "")
-        snapshots.append(RunSnapshot(
-            repository_id=repo_id,
-            workflow_id=workflow,
-            github_run_id=raw_id,
-            attempt=int(raw.get("run_attempt") or 1),
-            source_revision=str(raw.get("head_sha") or ""),
-            status=str(raw.get("status") or "unknown"),
-            conclusion=raw.get("conclusion"),
-            created_at=_timestamp(raw.get("created_at"), "created_at", run_id),
-            started_at=_timestamp(raw.get("run_started_at"), "run_started_at", run_id),
-            completed_at=_timestamp(raw.get("updated_at"), "updated_at", run_id),
-            jobs=tuple(jobs),
-        ))
+        snapshots.append(
+            RunSnapshot(
+                repository_id=repo_id,
+                workflow_id=workflow,
+                github_run_id=raw_id,
+                attempt=int(raw.get("run_attempt") or 1),
+                source_revision=str(raw.get("head_sha") or ""),
+                status=str(raw.get("status") or "unknown"),
+                conclusion=raw.get("conclusion"),
+                created_at=_timestamp(raw.get("created_at"), "created_at", run_id),
+                started_at=_timestamp(raw.get("run_started_at"), "run_started_at", run_id),
+                completed_at=_timestamp(raw.get("updated_at"), "updated_at", run_id),
+                jobs=tuple(jobs),
+            )
+        )
 
     report_runs = []
     for run in snapshots:
@@ -397,8 +519,10 @@ def sample_runs(
             jobs_by_name.setdefault(job.name, []).append(job)
         jobs_for_check = {
             check: [
-                job for name, jobs in jobs_by_name.items()
-                if name == check or name.startswith(f"{check} (")
+                job
+                for name, jobs in jobs_by_name.items()
+                if name == check
+                or name.startswith(f"{check} (")
                 or any(name.startswith(pattern) for pattern in required_job_patterns.get(check, ()))
                 for job in jobs
             ]
@@ -412,16 +536,16 @@ def sample_runs(
             check: bool(jobs) and all(job.conclusion == "success" for job in jobs)
             for check, jobs in jobs_for_check.items()
         }
-        seconds = sum(
-            job.duration_seconds or 0 for jobs in jobs_for_check.values() for job in jobs
+        seconds = sum(job.duration_seconds or 0 for jobs in jobs_for_check.values() for job in jobs)
+        report_runs.append(
+            {
+                "run": run.model_dump(mode="json"),
+                "required_check_results": check_results,
+                "required_job_counts": {check: len(jobs) for check, jobs in jobs_for_check.items()},
+                "required_runner_seconds": round(seconds, 3),
+                "evidence_class": "LIVE_GITHUB_METADATA",
+            }
         )
-        report_runs.append({
-            "run": run.model_dump(mode="json"),
-            "required_check_results": check_results,
-            "required_job_counts": {check: len(jobs) for check, jobs in jobs_for_check.items()},
-            "required_runner_seconds": round(seconds, 3),
-            "evidence_class": "LIVE_GITHUB_METADATA",
-        })
     result = {
         "repository": f"{owner}/{repo}",
         "repository_id": repo_id,

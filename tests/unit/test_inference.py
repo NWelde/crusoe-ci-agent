@@ -59,6 +59,7 @@ def test_complete_sends_separate_prompts_and_returns_only_message_content():
         {"role": "user", "content": "task evidence"},
     ]
     assert "test-secret" not in repr(request["json"])
+    assert "response_format" not in request["json"]
 
 
 def test_complete_retries_transient_service_failure_with_bounded_count(monkeypatch):
@@ -94,6 +95,7 @@ def test_structured_output_is_validated():
     )
 
     assert result == Decision(action="stop")
+    assert session.calls[0][1]["json"]["response_format"] == {"type": "json_object"}
     assert "action" in session.calls[0][1]["json"]["messages"][0]["content"]
 
 

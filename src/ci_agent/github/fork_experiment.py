@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -62,6 +63,10 @@ def prepare_fork_experiment(
     run_key: str,
     baseline_workflow: str | None = None,
     timeout_seconds: int = 120,
+    source_sha: str | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+    existing_fork: str | None = None,
+    common_source_files: dict[str, str] | None = None,
 ) -> PreparedFork:
     """Create a uniquely named fork with baseline and candidate dispatch refs.
 
@@ -74,31 +79,72 @@ def prepare_fork_experiment(
         raise ValueError("workflow_path must point inside .github/workflows")
     if not run_key.strip():
         raise ValueError("run_key is required")
+    for path, content in (common_source_files or {}).items():
+        if (not path or path.startswith(("/", "\\", ".github/workflows/")) or "\\" in path
+                or ":" in path or any(p in {".", "..", ".git"} for p in path.split("/"))
+                or not isinstance(content, str)):
+            raise ValueError("Common source files must be repository-relative non-workflow text files")
     identity = client.authenticated_user()
     fork_owner = str(identity.get("login") or "")
     if not fork_owner:
         raise GitHubAPIError("Authenticated GitHub account has no login")
     upstream_repo_data = client.repository(upstream_owner, upstream_repo)
-    source = client.get_contents(upstream_owner, upstream_repo, workflow_path,
-                                 str(upstream_repo_data.get("default_branch") or ""))
+    source_ref = source_sha or str(upstream_repo_data.get("default_branch") or "")
+    source = client.get_contents(upstream_owner, upstream_repo, workflow_path, source_ref)
     original = _content_text(source)
     baseline = _add_dispatch(baseline_workflow if baseline_workflow is not None else original)
     candidate = _add_dispatch(candidate_workflow)
     stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     fork_name = f"{upstream_repo[:55]}-exp-{stamp}-{_branch_slug(run_key)[:12]}"
-    client.fork_repository(upstream_owner, upstream_repo, name=fork_name)
-    fork = client.wait_for_repository(fork_owner, fork_name, timeout_seconds=timeout_seconds)
+    if existing_fork:
+        requested_owner, fork_name = _repository_parts(existing_fork)
+        if requested_owner.casefold() != fork_owner.casefold():
+            raise GitHubAPIError("Existing fork must belong to the authenticated account")
+        fork = client.repository(fork_owner, fork_name)
+    else:
+        if on_progress:
+            on_progress({"stage": "fork_requested", "repository": f"{fork_owner}/{fork_name}"})
+        created = client.fork_repository(upstream_owner, upstream_repo, name=fork_name)
+        if created.get("full_name", "").casefold() != f"{fork_owner}/{fork_name}".casefold():
+            raise GitHubAPIError(
+                "GitHub did not create the requested isolated fork; an existing fork may already "
+                "occupy this account's fork network. Select --fork-repository explicitly."
+            )
+        fork = client.wait_for_repository(fork_owner, fork_name, timeout_seconds=timeout_seconds)
     if fork.get("full_name", "").casefold() != f"{fork_owner}/{fork_name}".casefold():
         raise GitHubAPIError("GitHub returned a fork with an unexpected owner or name")
     parent = fork.get("parent") or {}
     if str(parent.get("full_name", "")).casefold() != upstream.casefold():
         raise GitHubAPIError("Created repository is not a fork of the requested upstream")
-    client.set_actions_enabled(fork_owner, fork_name, True)
+    if not existing_fork:
+        client.set_actions_enabled(fork_owner, fork_name, True)
     default_branch, _initial_sha = client.default_branch(fork_owner, fork_name)
+    if source_sha:
+        _initial_sha = source_sha
     baseline_branch = f"codex/{_branch_slug(run_key)}-baseline-{stamp[-6:]}"
     candidate_branch = f"codex/{_branch_slug(run_key)}-candidate-{stamp[-6:]}"
+    if on_progress:
+        on_progress({"stage": "branches_preparing", "repository": f"{fork_owner}/{fork_name}",
+                     "baseline_branch": baseline_branch, "candidate_branch": candidate_branch,
+                     "source_sha": _initial_sha})
     # Fork the exact upstream commit so drift between source inspection and
     # GitHub's asynchronous fork creation cannot silently change the baseline.
+    # Baseline repairs are explicit and identical in both variants, so a broken
+    # upstream check cannot be repaired only for the proposed optimization.
+    if common_source_files:
+        branch = f"codex/{_branch_slug(run_key)}-source-{stamp[-6:]}"
+        client.create_branch(fork_owner, fork_name, branch, _initial_sha)
+        for path, content in sorted((common_source_files or {}).items()):
+            existing = client.get_contents(fork_owner, fork_name, path, branch)
+            prepared = client.put_file(
+                fork_owner, fork_name, path, content,
+                f"ci-agent: common baseline preparation {run_key}", branch,
+                existing_sha=existing.get("sha"),
+            )
+            _initial_sha = str(prepared["commit"]["sha"])
+        if on_progress:
+            on_progress({"stage": "source_prepared", "source_sha": _initial_sha,
+                         "files": sorted(common_source_files)})
     client.create_branch(fork_owner, fork_name, baseline_branch, _initial_sha)
     client.create_branch(fork_owner, fork_name, candidate_branch, _initial_sha)
     baseline_file = client.get_contents(fork_owner, fork_name, workflow_path, baseline_branch)

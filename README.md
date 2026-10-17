@@ -2,9 +2,88 @@
 
 Done Means Done hackathon project: continuously inspect GitHub Actions, propose caching or parallelism improvements, verify results independently, and open evidence-backed PRs in a team-controlled fork.
 
-Status: BRO-31 local simulated experiment loop implemented. Live monitoring, real provider adapters, and real-run verdicts are not implemented.
+Status: live contract/proposal generation, independent review, bounded real-run
+execution, resumable evidence collection, independent evaluation, and gated
+draft publication implemented. The full-matrix live rehearsal reached four
+workflows: three passed all 187 jobs; the fourth passed 185 and failed two JRuby
+checks. That research experiment stopped with a void verdict. Demo mode now
+defaults to the one-pair Shadow Runner policy; its review draft is
+[PR #2](https://github.com/NWelde/jsonb_accessor/pull/2), including the later failures.
 
 Read [design.md](design.md) for the working architecture and [docs/shared-contract.md](docs/shared-contract.md) for the implemented shared data contract.
+
+## Live bounded experiments
+
+`ci-agent live-e2e` pins the real upstream workflow, asks Crusoe to generate and
+independently review a sealed contract and candidate, validates the permitted
+edit locally, and compares one real baseline/candidate pair using elapsed time.
+Shadow mode is the demo default, with a 5% observed-speedup threshold and no
+statistical-confidence claim. `--mode research` retains three pairs, summed
+runner minutes, cache verification, and strict publication gates.
+The first supported generated optimization
+shortens PostgreSQL service health polling from 10 seconds to 1 second and
+increases retries from 5 to 50. It preserves every test, matrix cell, command,
+runner type, service probe, and timeout. This preserves the nominal polling
+budget, not the strict worst-case failure deadline when probes consume timeout.
+
+```sh
+uv run ci-agent live-e2e --repository madeintandem/jsonb_accessor --fork-repository NWelde/jsonb_accessor --common-source-files artifacts/e2e-jsonb/baseline-fixes.json --output artifacts/new-live-e2e --confirm-live-runs
+```
+
+This writes isolated branches in the authenticated account's existing fork and
+consumes Actions minutes. Optional baseline source repairs are applied once
+on a shared commit before both variants branch; repairs are disclosed separately
+from the optimization and never applied to upstream. All 187 jobs remain in
+each workflow. Shadow mode records failed checks and allows a clearly labeled
+review draft with the measured outcome. Research mode stops on failures and
+requires all three pairs to improve with a mean reduction of at least 5%.
+Host noise and cache conditions remain explicit limitations.
+
+`report.json` and `report.md` are checkpointed before dispatch and after every
+run receipt and collection. Repeat the same command with `--resume` to reuse
+validated model records and reconcile saved runs without redispatching them.
+An exclusive process lock prevents simultaneous writers. Ambiguous pending
+dispatches and interrupted branch preparation require manual reconciliation.
+The elapsed budget limits polling and new dispatches; it does not cancel jobs
+already running. Add `--publish-draft` to request a draft in the fork. Shadow
+drafts disclose the single-pair result and known failures; research drafts
+require a verified win. Source ancestry and measured revisions are checked
+before publication. No merge is automated.
+`demo-loop --live` remains unsupported; `live-loop` accepts already reviewed
+artifacts and supports both dependency edits and service-readiness changes.
+
+If the account already has a fork of the target, add
+`--fork-repository NWelde/jsonb_accessor` to use isolated experiment branches in
+that fork. Its owner must match the authenticated account and its parent must
+match the requested upstream. This mode preserves the fork's Actions settings
+and default branch. Preparation receipts identify the branch names before writes.
+
+The October 17 live rehearsal reached baseline run
+[39072910344](https://github.com/NWelde/jsonb_accessor/actions/runs/39072910344)
+at upstream source `cef7a810a48ce9c3b8a79015591fddfb1a963e5a`.
+RuboCop failed with three offenses in `Rakefile`, `bin/console`, and
+`spec/spec_helper.rb`. The coordinator collected the evidence, recorded a void
+result, and stopped before candidate dispatch. Local evidence is under
+`artifacts/e2e-jsonb/live-parallelism-03/`. This verifies the real failure-stop
+path, not the successful three-pair path.
+
+The new qualification run is
+[39073317555](https://github.com/NWelde/jsonb_accessor/actions/runs/39073317555).
+It applies three comment-only RuboCop repairs plus JSON `< 3`, because JSON 3
+removed the `quirks_mode` option used by the Rails matrix. No test or matrix cell
+is removed. Reviewed live model artifacts are under
+`artifacts/final-e2e-upstream/`; execution evidence is under its `execution/` folder.
+
+The repeated candidate run
+[39074637916](https://github.com/NWelde/jsonb_accessor/actions/runs/39074637916)
+failed a false-default correctness assertion (JRuby 10 / Rails 6.1, seed 53578)
+and a 100 ms timing assertion (JRuby 9.4 / Rails 7.1, seed 716). These checks are
+preserved. The final report records the experiment as **void**, not a verified
+optimization; the first completed pair also had unmatched cache evidence.
+
+Remaining scope: broader caching policies, automatic replanning after failed
+proposals, global duplicate prevention across different output directories,
+automatic timeout cancellation, and recurring repository monitoring.
 
 ## Structure
 

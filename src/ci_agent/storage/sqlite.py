@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, TypeVar
+from typing import TypeVar
 from uuid import uuid4
 
 from pydantic import BaseModel

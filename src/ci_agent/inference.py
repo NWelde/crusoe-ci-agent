@@ -67,7 +67,10 @@ class CrusoeInference:
         except ValueError as exc:
             raise InferenceError(str(exc)) from exc
 
-    def complete(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> str:
+    def complete(
+        self, *, system_prompt: str, user_prompt: str, max_tokens: int = 2048,
+        response_format: dict[str, str] | None = None,
+    ) -> str:
         """Return one assistant message. Prompts and responses are never logged."""
         if not system_prompt.strip() or not user_prompt.strip():
             raise ValueError("system_prompt and user_prompt must both be non-empty.")
@@ -83,6 +86,8 @@ class CrusoeInference:
             "temperature": 0,
             "max_tokens": max_tokens,
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
         for attempt in range(self.max_retries + 1):
             try:
                 response = self.session.post(
@@ -140,6 +145,7 @@ class CrusoeInference:
             ),
             user_prompt=user_prompt,
             max_tokens=8192,
+            response_format={"type": "json_object"},
         )
         try:
             return output_model.model_validate_json(content)

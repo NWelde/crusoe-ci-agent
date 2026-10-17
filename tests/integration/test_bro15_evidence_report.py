@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPORT = Path("artifacts/bro-15-integration/report.json")
 
 

@@ -9,6 +9,28 @@ def test_local_smoke_requires_no_credentials():
     assert "Local SQLite smoke check passed" in result.output
 
 
+def test_live_e2e_wires_reviewed_setup_to_pinned_execution(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    from ci_agent.experiments import live_setup
+
+    setup = Mock(return_value={"sha": "pinned-sha", "workflow_path": ".github/workflows/ci.yml"})
+    execute = Mock(return_value={"outcome": "loss", "status": "completed"})
+    monkeypatch.setattr(live_setup, "prepare_e2e", setup)
+    monkeypatch.setattr("ci_agent.cli.run_live", execute)
+    monkeypatch.setattr("ci_agent.cli.GitHubClient.from_git_credential", lambda: "client")
+    args = ["live-e2e", "--fork-repository", "team/fork", "--output", str(tmp_path / "run")]
+    blocked = CliRunner().invoke(main, args)
+    assert blocked.exit_code != 0
+    setup.assert_not_called()
+    result = CliRunner().invoke(main, args + ["--confirm-live-runs"])
+    assert result.exit_code == 0, result.output
+    assert "Outcome: loss" in result.output
+    assert execute.call_args.kwargs["source_revision"] == "pinned-sha"
+    assert execute.call_args.kwargs["optimization"] == "service_readiness"
+    assert execute.call_args.kwargs["existing_fork"] == "team/fork"
+
+
 def test_missing_live_configuration_fails_without_exposing_values(monkeypatch):
     monkeypatch.setattr("ci_agent.cli.load_dotenv", lambda: None)
     for name in ("CRUSOE_API_KEY", "CRUSOE_MODEL", "CRUSOE_BASE_URL"):
