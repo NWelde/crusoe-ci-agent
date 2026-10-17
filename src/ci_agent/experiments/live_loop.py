@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 import json
 import time
 import zipfile
@@ -32,24 +31,9 @@ def count_workflow_jobs(raw, checks):
     jobs = workflow(raw)["jobs"]
     if not set(checks).issubset(jobs):
         raise ValueError("Required checks must identify workflow job IDs")
-    expected = 0
-    for name in checks:
-        matrix = jobs[name].get("strategy", {}).get("matrix", {})
-        if not isinstance(matrix, dict) or "include" in matrix:
-            raise ValueError("Dynamic/include matrices are not supported yet")
-        axes = {k: v for k, v in matrix.items() if k != "exclude"}
-        if any(not isinstance(v, list) or not v for v in axes.values()):
-            raise ValueError("Matrix axes must be nonempty static lists")
-        cells = [
-            dict(zip(axes, values, strict=True)) for values in itertools.product(*axes.values())
-        ]
-        expected += sum(
-            not any(
-                all(cell.get(k) == v for k, v in rule.items()) for rule in matrix.get("exclude", [])
-            )
-            for cell in cells
-        )
-    return expected
+    from ci_agent.workflows.matrix import matrix_cells
+
+    return sum(len(matrix_cells(jobs[name].get('strategy', {}).get('matrix', {}))) for name in checks)
 
 
 def validate_parallelism(baseline, candidate, checks):
@@ -181,6 +165,7 @@ def _run_live(
     prepared_fork=None,
     baseline_run_id=None,
     evaluation_mode="research",
+    source_evidence_path=None,
 ):
     """Run one supplied proposal. Existing output blocks accidental redispatch."""
     sealed = load_contract(contract_path)
@@ -261,8 +246,19 @@ def _run_live(
                 raise ValueError("Contract commands do not match the target workflow")
         # All workflow jobs must be measured, including any undeclared helper jobs.
         from ci_agent.strategies import validated_coverage
+        from ci_agent.workflows.source_evidence import collect_sources, verify_sources
 
-        expected = validated_coverage(optimization, baseline, candidate)
+        if source_evidence_path is not None and source_evidence_path.exists():
+            source_evidence = json.loads(source_evidence_path.read_text(encoding='utf-8'))
+            verify_sources(client, repository, sha, source_evidence)
+        else:
+            source_evidence = collect_sources(client, repository, sha)
+        (output / 'source-evidence.json').write_text(json.dumps(source_evidence, indent=2) + '\n', encoding='utf-8')
+        report['source_analysis'] = {'revision': sha, 'complete': source_evidence['complete'],
+                                     'files_inspected': len(source_evidence['files']),
+                                     'reason': source_evidence.get('reason')}
+        analysis_sources = source_evidence | {'files': source_evidence['files'] | (common_source_files or {})}
+        expected = validated_coverage(optimization, baseline, candidate, analysis_sources)
         (output / "baseline.yml").write_text(baseline, encoding="utf-8")
         (output / "candidate.yml").write_text(candidate, encoding="utf-8")
 

@@ -27,8 +27,15 @@ def publish_shadow_draft(client, report, output):
     candidate = (output / "candidate.yml").read_text(encoding="utf-8")
     from ci_agent.strategies import validated_coverage
 
+    source_evidence = None
+    source_path = output / 'source-evidence.json'
+    if source_path.exists():
+        from ci_agent.workflows.source_evidence import verify_sources
+        source_evidence = json.loads(source_path.read_text(encoding='utf-8'))
+        verify_sources(client, report['inputs']['repository'], report['upstream_source_sha'], source_evidence)
+        source_evidence = source_evidence | {'files': source_evidence['files'] | report['inputs'].get('common_source_files', {})}
     optimization = report["inputs"].get("optimization")
-    expected = validated_coverage(optimization, baseline, candidate)
+    expected = validated_coverage(optimization, baseline, candidate, source_evidence)
     measured = evaluate_shadow_pair(raw["baseline"], raw["candidate"], expected)
     if any(report.get(k) != v for k, v in measured.items()):
         raise ValueError("Demo summary differs from raw run evidence")

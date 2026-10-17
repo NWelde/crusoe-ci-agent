@@ -90,7 +90,7 @@ def test_discovery_and_exact_validation(strategy):
         ("checkout_reduction", "echo tests", "echo $(cat secret)"),
         ("setup_removal", "echo tests", "npm test"),
         ("setup_removal", "node-version: '22'", "node-version: '22'\n          cache: npm"),
-        ("superseded_cancellation", "on: pull_request", "on: [push, pull_request]"),
+        ("superseded_cancellation", "on: pull_request", "on: pull_request_target"),
         ("superseded_cancellation", "echo tests", "deploy"),
         ("service_readiness", "--health-timeout 5s ", ""),
     ],

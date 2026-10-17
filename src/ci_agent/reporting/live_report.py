@@ -36,6 +36,11 @@ def write_live_report(output, report, proposal_path=None):
                   "Job span includes scheduling gaps; no causal savings or exact critical path is established."]
     if report.get("reason"):
         lines += ["", f"Reason: {_text(report['reason'])}"]
+    if report.get('source_analysis'):
+        analysis = report['source_analysis']
+        lines += ['', f"Pinned source analysis: {analysis['files_inspected']} files; complete supported-source inventory: {analysis['complete']}."]
+        if analysis.get('reason'):
+            lines += [f"Source analysis limitation: {_text(analysis['reason'])}"]
     if report.get("failed_checks"):
         lines += [
             "",

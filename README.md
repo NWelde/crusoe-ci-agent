@@ -16,7 +16,8 @@ Read [design.md](design.md) for the working architecture and [docs/shared-contra
 ## Optimization strategy registry
 
 The normal `live-e2e` path now discovers and selects among five evidence-gated
-non-cache transformations. See [supported strategies, CLI and fixture demo](docs/optimization-strategies.md)
+non-cache transformations on real build/test workflows, with repository script and
+source-usage analysis. See [supported strategies, CLI and fixture demo](docs/optimization-strategies.md)
 for exact eligibility limits and reproducible integration runs. `ci-agent strategies`
 reports eligible changes and rejection reasons without dispatching CI.
 
@@ -31,8 +32,8 @@ runner minutes, cache verification, and strict publication gates.
 The registry selects among dependency parallelism, checkout reduction, unused setup
 removal, cancellation of superseded runs, and PostgreSQL readiness polling when
 its structural evidence requirements are satisfied. The original JSONB example
-uses readiness polling; ordinary test workloads often need stronger dependency
-proof before other strategies can apply. No eligible change means no dispatch.
+uses readiness polling; other strategies inspect actual build/test commands, script closures, checkout
+history usage and runtime consumers. Success/failure dependency gates remain protected. No eligible change means no dispatch.
 
 ```sh
 uv run ci-agent live-e2e --repository madeintandem/jsonb_accessor --fork-repository NWelde/jsonb_accessor --common-source-files artifacts/e2e-jsonb/baseline-fixes.json --output artifacts/new-live-e2e --confirm-live-runs

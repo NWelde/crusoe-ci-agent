@@ -67,8 +67,15 @@ def publish_verified_draft(client, report, output):
     baseline = (output / "baseline.yml").read_text(encoding="utf-8")
     from ci_agent.strategies import validated_coverage
 
+    source_evidence = None
+    source_path = output / 'source-evidence.json'
+    if source_path.exists():
+        from ci_agent.workflows.source_evidence import verify_sources
+        source_evidence = json.loads(source_path.read_text(encoding='utf-8'))
+        verify_sources(client, report['inputs']['repository'], report['upstream_source_sha'], source_evidence)
+        source_evidence = source_evidence | {'files': source_evidence['files'] | report['inputs'].get('common_source_files', {})}
     expected = validated_coverage(report['inputs']['optimization'], baseline,
-                      (output / 'candidate.yml').read_text(encoding='utf-8'))
+                      (output / 'candidate.yml').read_text(encoding='utf-8'), source_evidence)
     raw_pairs = []
     for index in range(1, 4):
         raw_pair = {}

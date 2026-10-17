@@ -49,6 +49,10 @@ def prepare_e2e(*, repository: str, output: Path, template: Path, resume: bool =
     payload = json.loads(template.read_text(encoding='utf-8'))
     path = payload['context']['workflow']['path']
     baseline = _content_text(github.get_contents(owner, name, path, sha))
+    from ci_agent.workflows.source_evidence import collect_sources
+
+    source_evidence = collect_sources(github, repository, sha)
+    (output / 'source-evidence.json').write_text(json.dumps(source_evidence, indent=2) + '\n', encoding='utf-8')
     payload['context']['repository'] = repository
     payload['context']['workflow'].update(
         repository_id=repository.replace('/', '-'), raw_yaml=baseline,
@@ -71,7 +75,7 @@ def prepare_e2e(*, repository: str, output: Path, template: Path, resume: bool =
     print('Reviewed contract saved; requesting live proposal and independent review.', flush=True)
     generate_live_proposal(
         client, repository=repository, baseline=baseline,
-        sealed_contract=result.sealed_contract, output=output / 'proposal',
+        sealed_contract=result.sealed_contract, output=output / 'proposal', source_evidence=source_evidence,
         evidence=(
             f'Workflow source is pinned to {sha}.',
             'No measured optimization savings are available.',
@@ -97,6 +101,11 @@ def _resume_e2e(*, repository: str, output: Path):
         or workflow.raw_yaml != baseline or workflow.content_fingerprint != fingerprint
     ):
         raise ValueError('Saved setup source, repository, or workflow fingerprint is inconsistent')
+    source_evidence_path = output / 'source-evidence.json'
+    source_evidence = json.loads(source_evidence_path.read_text(encoding='utf-8')) if source_evidence_path.exists() else None
+    if source_evidence is not None:
+        from ci_agent.workflows.source_evidence import verify_sources
+        verify_sources(GitHubClient.from_git_credential(), repository, source['sha'], source_evidence)
     contract_path = output / 'contract' / 'success-contract.json'
     sealed = load_contract(contract_path) if contract_path.exists() else None
     if sealed is not None and (
@@ -129,7 +138,7 @@ def _resume_e2e(*, repository: str, output: Path):
         from ci_agent.strategies import validate_strategy
         if proposal.optimization not in sealed.contract.allowed_optimizations:
             raise ValueError('Saved strategy is outside contract')
-        validate_strategy(proposal.optimization, baseline, candidate)
+        validate_strategy(proposal.optimization, baseline, candidate, source_evidence)
         return source
     if (output / 'proposal').exists():
         raise ValueError('Incomplete or rejected proposal records must be inspected before retrying')
@@ -148,7 +157,7 @@ def _resume_e2e(*, repository: str, output: Path):
         save_contract(contract_path, sealed)
     generate_live_proposal(
         client, repository=repository, baseline=baseline, sealed_contract=sealed,
-        output=output / 'proposal',
+        output=output / 'proposal', source_evidence=source_evidence,
         evidence=(f'Workflow source is pinned to {source["sha"]}.',),
     )
     return source
